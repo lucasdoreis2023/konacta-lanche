@@ -854,6 +854,62 @@ async function processAudioMessage(
   const { intent } = detectIntent(transcript);
   console.log(`Intenção detectada: ${intent} para transcrição: "${transcript}"`);
   
+  // ESTADO CONFIRM: Confirmação final do pedido
+  if (currentState === "CONFIRM") {
+    if (intent === "confirm") {
+      const orderNumber = await createOrder(supabase, newContext, phone);
+      
+      if (!orderNumber) {
+        return {
+          newState: "CONFIRM",
+          messages: ["😥 Erro ao criar pedido! Tenta *CONFIRMAR* de novo?"],
+          newContext,
+          sendVoiceReply: true,
+          voiceText: "Houve um erro ao criar o pedido. Pode tentar confirmar novamente?"
+        };
+      }
+      
+      const clearedContext = { cart: [] };
+      
+      return {
+        newState: "WELCOME",
+        messages: [
+          "✅ *PEDIDO CONFIRMADO!*",
+          `🎉 Pedido *#${orderNumber}* recebido!`,
+          "Você receberá atualizações por aqui! 💛",
+          "Obrigado! Digite *CARDÁPIO* para novo pedido."
+        ],
+        newContext: clearedContext,
+        sendVoiceReply: true,
+        voiceText: `Pedido número ${orderNumber} confirmado com sucesso! Você receberá atualizações por aqui. Obrigado!`
+      };
+    }
+    
+    if (intent === "deny") {
+      return {
+        newState: "CART",
+        messages: [
+          "Ok! 😊",
+          "Seu carrinho está salvo. *CARRINHO* para ver ou *CANCELAR* para limpar."
+        ],
+        newContext,
+        sendVoiceReply: true,
+        voiceText: "Ok, cancelei. Seu carrinho está salvo."
+      };
+    }
+    
+    // Não entendeu no estado CONFIRM - pede para repetir
+    return {
+      newState: "CONFIRM",
+      messages: [
+        "🔄 Não entendi. Diga *CONFIRMAR* para finalizar ou *CANCELAR* para voltar."
+      ],
+      newContext,
+      sendVoiceReply: true,
+      voiceText: "Não entendi. Diga confirmar para finalizar o pedido ou cancelar para voltar."
+    };
+  }
+  
   // Se está no estado VOICE_ORDER_CONFIRM, trata confirmação/negação
   if (currentState === "VOICE_ORDER_CONFIRM") {
     if (intent === "confirm") {
@@ -863,7 +919,6 @@ async function processAudioMessage(
       return {
         newState: "CHECKOUT_NAME",
         messages: [
-          `📝 Ouvi: "${transcript}"`,
           "✅ Ótimo! Pedido confirmado no carrinho!",
           `🛒 Total atual: ${formatPrice(cartTotal)}`,
           "Vamos finalizar? Me diz seu *nome*:"
@@ -889,7 +944,6 @@ async function processAudioMessage(
       return {
         newState: "WELCOME",
         messages: [
-          `📝 Ouvi: "${transcript}"`,
           "❌ Ok, cancelei os itens do áudio.",
           "Pode *enviar outro áudio* ou digitar *CARDÁPIO* para escolher manualmente!"
         ],
@@ -898,6 +952,17 @@ async function processAudioMessage(
         voiceText: "Ok, cancelei os itens. Pode enviar outro áudio com seu pedido."
       };
     }
+    
+    // Não entendeu - pede para repetir
+    return {
+      newState: "VOICE_ORDER_CONFIRM",
+      messages: [
+        "🔄 Não entendi. Diga *SIM* para confirmar ou *NÃO* para cancelar."
+      ],
+      newContext,
+      sendVoiceReply: true,
+      voiceText: "Não entendi. Diga sim para confirmar ou não para cancelar."
+    };
   }
   
   // Se está no estado VOICE_ORDERING, continua adicionando itens
@@ -908,7 +973,6 @@ async function processAudioMessage(
         return {
           newState: "VOICE_ORDERING",
           messages: [
-            `📝 Ouvi: "${transcript}"`,
             "Seu carrinho está vazio! O que você gostaria de pedir?"
           ],
           newContext,
@@ -925,7 +989,6 @@ async function processAudioMessage(
       return {
         newState: "CHECKOUT_NAME",
         messages: [
-          `📝 Ouvi: "${transcript}"`,
           `🛒 *Seu pedido:*\n\n${cartList}\n\n💰 *Total: ${formatPrice(total)}*`,
           "Perfeito! Vamos finalizar. Me diz seu *nome*:"
         ],
@@ -946,7 +1009,6 @@ async function processAudioMessage(
     return {
       newState: "CHECKOUT_NAME",
       messages: [
-        `📝 Ouvi: "${transcript}"`,
         `🛒 *Seu pedido:*\n\n${cartList}\n\n💰 *Total: ${formatPrice(total)}*`,
         "Perfeito! Vamos finalizar. Me diz seu *nome*:"
       ],
@@ -966,7 +1028,6 @@ async function processAudioMessage(
     return {
       newState: "MENU",
       messages: [
-        `📝 Ouvi: "${transcript}"`,
         `📋 *NOSSO CARDÁPIO*\n\n${categoryList}\n\nDigite o *número* da categoria.\n\n🎤 Ou fale o que você quer pedir!`
       ],
       newContext,
@@ -983,7 +1044,6 @@ async function processAudioMessage(
       return {
         newState: "WELCOME",
         messages: [
-          `📝 Ouvi: "${transcript}"`,
           "📭 Você não tem pedidos em andamento no momento.",
           "Que tal fazer um pedido? Fale o que você quer! 😋"
         ],
@@ -999,7 +1059,6 @@ async function processAudioMessage(
     return {
       newState: "WELCOME",
       messages: [
-        `📝 Ouvi: "${transcript}"`,
         `📦 *PEDIDO #${order.order_number}*\n\n${status.emoji} *${status.label}*\n${status.description}`,
         "Quer fazer mais um pedido? É só falar!"
       ],
@@ -1042,7 +1101,6 @@ async function processAudioMessage(
       return {
         newState: "VOICE_ORDERING",
         messages: [
-          `📝 Ouvi: "${transcript}"`,
           `✅ Anotado!\n\n${itemsList}`,
           `🛒 Total parcial: ${formatPrice(total)}`,
           "Deseja *mais alguma coisa*? Pode falar!\n\nOu diga *FINALIZAR* quando terminar."
@@ -1057,7 +1115,6 @@ async function processAudioMessage(
     return {
       newState: "VOICE_ORDERING",
       messages: [
-        `📝 Ouvi: "${transcript}"`,
         `${greeting}! Que bom que você quer fazer um pedido! 😊`,
         "O que você gostaria de pedir?\n\n🎤 Pode falar os itens diretamente!"
       ],
@@ -1079,25 +1136,24 @@ async function processAudioMessage(
       return {
         newState: "VOICE_ORDERING",
         messages: [
-          `📝 Ouvi: "${transcript}"`,
-          "Entendi que você quer fazer um pedido! 😊",
-          "Mas não identifiquei os produtos. Pode falar mais claramente?\n\nExemplo: *quero dois hambúrgueres e uma coca*"
+          "🔄 Entendi que você quer fazer um pedido, mas não identifiquei os produtos.",
+          "Pode *repetir* mais claramente?\n\nExemplo: *quero dois hambúrgueres e uma coca*"
         ],
         newContext,
         sendVoiceReply: true,
-        voiceText: "Entendi que você quer fazer um pedido. Pode falar mais claramente o que deseja? Por exemplo: quero dois hambúrgueres e uma coca."
+        voiceText: "Entendi que você quer fazer um pedido. Pode repetir mais claramente o que deseja?"
       };
     }
     
+    // Não entendeu - pede para repetir
     return {
       newState: currentState === "VOICE_ORDERING" ? "VOICE_ORDERING" : "WELCOME",
       messages: [
-        `📝 Ouvi: "${transcript}"`,
-        "😊 O que você gostaria de fazer?\n\n🎤 *Fazer pedido* - fale os itens que deseja\n📋 *CARDÁPIO* - ver nossos produtos\n📦 *STATUS* - consultar seu pedido"
+        "🔄 Não entendi. Pode *repetir* de forma mais clara?\n\n💡 Dica: Fale os itens que deseja, peça *CARDÁPIO* ou consulte o *STATUS* do seu pedido."
       ],
       newContext,
       sendVoiceReply: true,
-      voiceText: "O que você gostaria de fazer? Pode falar os itens do pedido, pedir o cardápio ou consultar o status."
+      voiceText: "Não entendi. Pode repetir de forma mais clara?"
     };
   }
 
@@ -1126,7 +1182,6 @@ async function processAudioMessage(
   return {
     newState: "VOICE_ORDERING",
     messages: [
-      `📝 Ouvi: "${transcript}"`,
       `✅ Anotado!\n\n${itemsList}`,
       `🛒 Total parcial: ${formatPrice(total)}`,
       "Deseja *mais alguma coisa*? Pode falar!\n\nOu diga *FINALIZAR* quando terminar."
