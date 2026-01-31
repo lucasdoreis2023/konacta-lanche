@@ -62,12 +62,35 @@ function detectIntent(text: string): { intent: string; confidence: number } {
   return { intent: "unknown", confidence: 0 };
 }
 
+// Corrige transcrições de pronúncias brasileiras comuns
+function fixTranscriptionPronunciation(text: string): string {
+  let fixed = text;
+  
+  // Correções de pronúncia para lanches "X-" (xis)
+  // "exi bacon" -> "x-bacon", "xis bacon" -> "x-bacon", "shis bacon" -> "x-bacon"
+  fixed = fixed.replace(/\b(exi|exis|xis|shis|chis|shi|chi)\s*(bacon|tudo|salada|egg|frango|calabresa|burger|burguer|picanha|costela|carne|queijo|misto)/gi, 
+    (_, prefix, item) => `x-${item}`);
+  
+  // Também corrige quando vem junto: "exibacon" -> "x-bacon"
+  fixed = fixed.replace(/\b(exi|xis|shis|chis)(bacon|tudo|salada|egg|frango|calabresa|burger|burguer|picanha|costela|carne|queijo|misto)/gi,
+    (_, prefix, item) => `x-${item}`);
+  
+  // Correção para "x tudo", "x bacon" (sem hífen) -> "x-tudo", "x-bacon"
+  fixed = fixed.replace(/\bx\s+(bacon|tudo|salada|egg|frango|calabresa|burger|burguer|picanha|costela|carne|queijo|misto)/gi,
+    (_, item) => `x-${item}`);
+  
+  return fixed;
+}
+
 function normalizeText(input: string): string {
-  return input
+  // Primeiro aplica correções de pronúncia
+  const corrected = fixTranscriptionPronunciation(input);
+  
+  return corrected
     .toLowerCase()
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/[^a-z0-9\s-]/g, " ") // Mantém hífen para x-bacon
     .replace(/\s+/g, " ")
     .trim();
 }
