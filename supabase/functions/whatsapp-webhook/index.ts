@@ -942,7 +942,9 @@ function isValidCustomerName(name: unknown): name is string {
     .replace(/[\u0300-\u036f]/g, "");
 
   if (cleaned.length < 2) return false;
-  const invalid = [
+  
+  // Nomes inválidos explícitos
+  const invalidExact = [
     "nao informado",
     "não informado",
     "sem nome",
@@ -950,8 +952,44 @@ function isValidCustomerName(name: unknown): name is string {
     "anonimo",
     "anônimo",
     "nao sei",
+    "pendente",
+    "pendente - revisao",
   ];
-  return !invalid.includes(cleaned);
+  if (invalidExact.includes(cleaned)) return false;
+  
+  // Padrões que indicam que é uma frase, não um nome
+  const invalidPatterns = [
+    /\b(oi|ola|bom dia|boa tarde|boa noite)\b/,
+    /\b(gostaria|quero|queria|preciso|pedido|pedir)\b/,
+    /\b(fazer|enviar|mandar|trazer)\b/,
+    /\b(cardapio|menu|produtos|opcoes)\b/,
+    /\b(entrega|delivery|retirada|buscar)\b/,
+    /\b(pix|cartao|dinheiro|pagamento)\b/,
+    /\b(rua|avenida|endereco|bairro|numero)\b/,
+    /[?!]/,  // Frases com pontuação de pergunta/exclamação
+  ];
+  
+  for (const pattern of invalidPatterns) {
+    if (pattern.test(cleaned)) return false;
+  }
+  
+  // Nomes muito longos provavelmente são frases
+  if (cleaned.length > 50) return false;
+  
+  // Nomes com muitas palavras provavelmente são frases (mais de 4 palavras)
+  const words = cleaned.split(/\s+/).filter(w => w.length > 0);
+  if (words.length > 4) return false;
+  
+  return true;
+}
+
+// Sanitiza o nome do cliente para exibição/áudio
+function sanitizeCustomerName(name: string | null | undefined): string | null {
+  if (!name) return null;
+  if (!isValidCustomerName(name)) return null;
+  
+  // Remove caracteres especiais e limpa o nome
+  return name.trim().replace(/[^\p{L}\s]/gu, "").trim() || null;
 }
 
 function getConfirmOrderBlockReason(context: ConversationContext): ConfirmOrderBlockReason | null {

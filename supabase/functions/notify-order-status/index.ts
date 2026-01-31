@@ -182,6 +182,55 @@ function formatPrice(price: number): string {
   }).format(price);
 }
 
+// Valida e sanitiza o nome do cliente (evita frases como "Oi, eu gostaria de fazer um pedido")
+function sanitizeCustomerName(name: string | null | undefined): string | null {
+  if (!name) return null;
+  
+  const cleaned = name
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+
+  // Nomes inválidos explícitos
+  const invalidExact = [
+    "nao informado",
+    "não informado",
+    "sem nome",
+    "cliente",
+    "anonimo",
+    "anônimo",
+    "nao sei",
+    "pendente",
+    "pendente - revisao",
+  ];
+  if (invalidExact.includes(cleaned)) return null;
+  
+  // Padrões que indicam que é uma frase, não um nome
+  const invalidPatterns = [
+    /\b(oi|ola|bom dia|boa tarde|boa noite)\b/,
+    /\b(gostaria|quero|queria|preciso|pedido|pedir)\b/,
+    /\b(fazer|enviar|mandar|trazer)\b/,
+    /\b(cardapio|menu|produtos|opcoes)\b/,
+    /\b(entrega|delivery|retirada|buscar)\b/,
+    /\b(pix|cartao|dinheiro|pagamento)\b/,
+    /\b(rua|avenida|endereco|bairro|numero)\b/,
+    /[?!]/,
+  ];
+  
+  for (const pattern of invalidPatterns) {
+    if (pattern.test(cleaned)) return null;
+  }
+  
+  // Nomes muito longos ou com muitas palavras provavelmente são frases
+  if (cleaned.length > 50) return null;
+  const words = cleaned.split(/\s+/).filter(w => w.length > 0);
+  if (words.length > 4) return null;
+  
+  // Remove caracteres especiais e retorna o nome limpo
+  return name.trim().replace(/[^\p{L}\s]/gu, "").trim() || null;
+}
+
 // Gera mensagem baseada no status (para texto)
 function getStatusMessage(
   orderNumber: number, 
@@ -190,7 +239,8 @@ function getStatusMessage(
   orderType: string,
   total: number
 ): string {
-  const greeting = customerName ? `Olá, ${customerName}! ` : "Olá! ";
+  const safeName = sanitizeCustomerName(customerName);
+  const greeting = safeName ? `Olá, ${safeName}! ` : "Olá! ";
   
   switch (status) {
     case "EM_PREPARO":
@@ -221,7 +271,8 @@ function getStatusVoiceScript(
   orderType: string,
   total: number
 ): string {
-  const greeting = customerName ? `Olá, ${customerName}!` : "Olá!";
+  const safeName = sanitizeCustomerName(customerName);
+  const greeting = safeName ? `Olá, ${safeName}!` : "Olá!";
   const totalFormatted = formatPrice(total).replace("R$", "reais");
   
   switch (status) {
