@@ -2059,23 +2059,19 @@ Deno.serve(async (req) => {
 
     await updateSession(supabase, phone, result.newState, result.newContext);
 
-    // Envia mensagens (se não for áudio, pois áudio já envia durante processamento)
-    if (!isAudioMessage) {
-      await sendMultipleMessages(phone, result.messages);
-    } else {
-      // Para áudio, envia as mensagens de texto
-      for (let i = 0; i < result.messages.length; i++) {
-        if (i > 0) {
-          await delay(800 + Math.random() * 700);
-        }
-        await sendWhatsAppMessage(phone, result.messages[i], true);
+    // Envia mensagens de texto
+    for (let i = 0; i < result.messages.length; i++) {
+      if (i > 0) {
+        await delay(800 + Math.random() * 700);
       }
-      
-      // Envia resposta em áudio se configurado
-      if (result.sendVoiceReply && result.voiceText) {
-        await delay(500);
-        await sendVoiceResponse(phone, result.voiceText);
-      }
+      await sendWhatsAppMessage(phone, result.messages[i], true);
+    }
+    
+    // RESPONDE COM ÁUDIO APENAS SE O CLIENTE ENVIOU ÁUDIO
+    // Isso facilita para pessoas que não conseguem ler ou escrever
+    if (isAudioMessage && result.sendVoiceReply && result.voiceText) {
+      await delay(500);
+      await sendVoiceResponse(phone, result.voiceText);
     }
 
     // Notifica n8n
