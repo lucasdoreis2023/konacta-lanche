@@ -63,8 +63,8 @@ async function generateTTSAudio(text: string): Promise<ArrayBuffer | null> {
     return null;
   }
 
-  // Voice ID: Ana Alice - Amigável e Clara (português brasileiro)
-  const voiceId = "ORgG8rwdAiMYRug8RJwR";
+  // Voice ID: Nova voz selecionada pelo usuário
+  const voiceId = "RGymW84CSmfVugnA5tvA";
 
   try {
     const response = await fetch(
@@ -83,7 +83,7 @@ async function generateTTSAudio(text: string): Promise<ArrayBuffer | null> {
             similarity_boost: 0.75,
             style: 0.3,
             use_speaker_boost: true,
-            speed: 1.1,
+            speed: 0.85, // Velocidade mais lenta para melhor compreensão
           },
         }),
       }
@@ -355,6 +355,34 @@ Deno.serve(async (req) => {
       console.log(`Enviando notificação por TEXTO para ${customerPhone}`);
       const message = getStatusMessage(orderNumber, status, customerName, orderType, total);
       success = await sendWhatsAppMessage(customerPhone, message);
+    }
+
+    // Se o pedido foi entregue ou cancelado, reseta a conversa para permitir novo pedido
+    if (success && (status === "ENTREGUE" || status === "CANCELADO")) {
+      try {
+        const supabase = getSupabase();
+        
+        // Limpa o telefone para o formato usado na tabela
+        const cleanPhone = customerPhone.replace(/\D/g, "");
+        
+        // Reseta a sessão de conversa
+        const { error } = await supabase
+          .from("conversation_sessions")
+          .update({
+            current_state: "WELCOME",
+            context_json: {},
+            updated_at: new Date().toISOString(),
+          })
+          .eq("phone_number", cleanPhone);
+        
+        if (error) {
+          console.error("Erro ao resetar conversa:", error);
+        } else {
+          console.log(`Conversa resetada para ${cleanPhone} após ${status}`);
+        }
+      } catch (resetError) {
+        console.error("Erro ao tentar resetar conversa:", resetError);
+      }
     }
 
     if (success) {
