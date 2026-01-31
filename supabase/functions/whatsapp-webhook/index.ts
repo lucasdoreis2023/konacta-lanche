@@ -305,6 +305,19 @@ async function processMessage(
     }
 
     case "MENU": {
+      // Aceita saudações e mostra o menu novamente
+      if (["oi", "olá", "ola", "oie", "bom dia", "boa tarde", "boa noite", "oi!"].includes(msgLower)) {
+        const categories = await getCategories(supabase);
+        const categoryList = categories
+          .map((cat, i) => `*${i + 1}* - ${cat.name}`)
+          .join("\n");
+        return {
+          newState: "MENU",
+          response: `Olá! 👋 Que bom ter você aqui!\n\n📋 *CARDÁPIO*\n\nEscolha uma categoria:\n\n${categoryList}\n\nDigite o *número* da categoria desejada.`,
+          newContext,
+        };
+      }
+
       const categories = await getCategories(supabase);
       const index = parseInt(msgLower) - 1;
 
@@ -344,9 +357,14 @@ async function processMessage(
         };
       }
 
+      // Mensagem de ajuda mais amigável
+      const categoriesForHelp = await getCategories(supabase);
+      const categoryListHelp = categoriesForHelp
+        .map((cat, i) => `*${i + 1}* - ${cat.name}`)
+        .join("\n");
       return {
         newState: "MENU",
-        response: "❌ Opção inválida. Digite o *número* da categoria desejada.",
+        response: `Não entendi 😅\n\n📋 *CARDÁPIO*\n\n${categoryListHelp}\n\nDigite o *número* da categoria (ex: *1* para ${categoriesForHelp[0]?.name || "Lanches"})`,
         newContext,
       };
     }
