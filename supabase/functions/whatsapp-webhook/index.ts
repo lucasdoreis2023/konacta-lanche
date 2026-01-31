@@ -767,6 +767,27 @@ type AIActionResult = {
   confirmOrderBlocked?: ConfirmOrderBlockReason;
 };
 
+function isValidCustomerName(name: unknown): name is string {
+  if (typeof name !== "string") return false;
+  const cleaned = name
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+
+  if (cleaned.length < 2) return false;
+  const invalid = [
+    "nao informado",
+    "não informado",
+    "sem nome",
+    "cliente",
+    "anonimo",
+    "anônimo",
+    "nao sei",
+  ];
+  return !invalid.includes(cleaned);
+}
+
 // Processa mensagem com IA (DeepSeek)
 async function processWithAI(
   supabase: ReturnType<typeof getSupabase>,
@@ -918,6 +939,14 @@ async function processWithAI(
             }
           }
         }
+
+        // Guardrail: nunca afirmar "pedido confirmado" sem ter executado confirm_order.
+        // Isso evita que o cliente ouça uma confirmação que não virou pedido no sistema.
+        const saidConfirmed = /pedido\s+(?:ja\s+)?confirmad[oa]/i.test(textReply);
+        if (saidConfirmed && parsed.action !== "confirm_order") {
+          textReply = "Pra eu confirmar no sistema, me diga só: CONFIRMAR. Se preferir, me fale também seu nome.";
+          voiceReply = "Pra eu confirmar no sistema, me diga só: confirmar. E se puder, me fala seu nome também.";
+        }
         
         // Adiciona resposta ao histórico
         newContext.conversationHistory?.push({
@@ -1063,29 +1092,43 @@ async function processAIAction(
       
       // Se action_data tiver itens, adiciona ao carrinho primeiro
       if (actionData.items && Array.isArray(actionData.items) && actionData.items.length > 0) {
-        // Limpa carrinho e adiciona os itens do action_data
-        newContext.cart = [];
+        // Regra: NÃO sobrescrever carrinho existente com lista parcial.
+        // - Se carrinho estiver vazio: usa action_data.items como fonte
+        // - Se carrinho já tiver itens: apenas faz merge (não remove nada)
+        const shouldReplace = newContext.cart.length === 0;
+        if (shouldReplace) newContext.cart = [];
+
         for (const item of actionData.items) {
-          const product = products.find(p => 
-            p.name.toLowerCase().includes(item.name.toLowerCase()) ||
-            item.name.toLowerCase().includes(p.name.toLowerCase())
+          if (!item?.name) continue;
+          const itemName = String(item.name);
+          const qty = Number(item.quantity || 1);
+          const product = products.find(
+            (p) =>
+              p.name.toLowerCase().includes(itemName.toLowerCase()) ||
+              itemName.toLowerCase().includes(p.name.toLowerCase())
           );
-          
-          if (product) {
+
+          if (!product) continue;
+
+          const existing = newContext.cart.find((c) => c.productId === product.id);
+          if (existing) {
+            // Se estamos substituindo, soma; se estamos mesclando, soma também (não atrapalha)
+            existing.quantity += qty;
+          } else {
             newContext.cart.push({
               productId: product.id,
               productName: product.name,
-              quantity: item.quantity || 1,
-              price: product.price
+              quantity: qty,
+              price: product.price,
             });
-            console.log(`[AI Action] Item adicionado via confirm: ${item.quantity || 1}x ${product.name}`);
           }
+          console.log(`[AI Action] Item ${shouldReplace ? "definido" : "mesclado"} via confirm: ${qty}x ${product.name}`);
         }
       }
       
       // Atualiza dados do contexto se vieram no action_data
-      if (actionData.name) {
-        newContext.customerName = actionData.name;
+      if (isValidCustomerName(actionData.name)) {
+        newContext.customerName = actionData.name.trim();
       }
       if (actionData.delivery_type) {
         newContext.orderType = actionData.delivery_type === "DELIVERY" ? "DELIVERY" : "PRESENCIAL";
@@ -1099,7 +1142,8 @@ async function processAIAction(
           "cartao": "CARTAO", "cartão": "CARTAO", "CARTAO": "CARTAO",
           "dinheiro": "DINHEIRO", "DINHEIRO": "DINHEIRO",
         };
-        newContext.paymentMethod = paymentMap[actionData.payment] || actionData.payment;
+        const key = String(actionData.payment).toLowerCase().trim();
+        newContext.paymentMethod = paymentMap[key] || paymentMap[String(actionData.payment)] || actionData.payment;
       }
       
       // Valida se temos tudo necessário
@@ -1109,7 +1153,7 @@ async function processAIAction(
         break;
       }
       
-      if (!newContext.customerName) {
+      if (!isValidCustomerName(newContext.customerName)) {
         console.error("[AI Action] ERRO: Tentativa de confirmar pedido sem nome do cliente!");
         confirmOrderBlocked = "missing_name";
         break;
