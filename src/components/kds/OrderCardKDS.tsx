@@ -5,7 +5,7 @@ import { OrderWithItems } from '@/hooks/useOrders';
 import { OrderStatus } from '@/types/database';
 import { supabase } from '@/integrations/supabase/client';
 import { toast } from 'sonner';
-import { Clock, MapPin, Phone, User, ChefHat, Check, X, MessageCircle } from 'lucide-react';
+import { Clock, MapPin, Phone, User, ChefHat, Check, X, MessageCircle, AlertTriangle } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 
@@ -29,6 +29,13 @@ const nextActionLabels: Record<string, { label: string; icon: React.ReactNode }>
 
 // Status que devem enviar notificação ao cliente
 const notifiableStatuses: OrderStatus[] = ['EM_PREPARO', 'PRONTO', 'ENTREGUE', 'CANCELADO'];
+
+// Verifica se o pedido está em revisão (baseado nas notes)
+function isOrderInReview(notes: string | null): boolean {
+  if (!notes) return false;
+  return notes.includes('EM REVISÃO') || notes.includes('REVISÃO');
+}
+
 
 export function OrderCardKDS({ order }: OrderCardKDSProps) {
   const config = statusConfig[order.status];
@@ -103,12 +110,20 @@ export function OrderCardKDS({ order }: OrderCardKDSProps) {
 
   return (
     <Card className="overflow-hidden">
-      <CardHeader className={`${config.color} text-white py-3`}>
+      <CardHeader className={`${isOrderInReview(order.notes) ? 'bg-orange-500' : config.color} text-white py-3`}>
         <div className="flex items-center justify-between">
           <CardTitle className="text-xl">#{order.order_number}</CardTitle>
-          <Badge variant="secondary" className="text-xs">
-            {order.channel} • {order.order_type === 'DELIVERY' ? 'Delivery' : 'Retirada'}
-          </Badge>
+          <div className="flex gap-1">
+            {isOrderInReview(order.notes) && (
+              <Badge variant="destructive" className="text-xs bg-yellow-600">
+                <AlertTriangle className="h-3 w-3 mr-1" />
+                REVISÃO
+              </Badge>
+            )}
+            <Badge variant="secondary" className="text-xs">
+              {order.channel} • {order.order_type === 'DELIVERY' ? 'Delivery' : 'Retirada'}
+            </Badge>
+          </div>
         </div>
         <div className="flex items-center gap-1 text-sm opacity-90">
           <Clock className="h-3 w-3" />
