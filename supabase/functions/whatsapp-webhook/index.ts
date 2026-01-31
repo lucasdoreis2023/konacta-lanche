@@ -27,8 +27,7 @@ type ConversationState =
 // Palavras-chave para detecção de intenção (ordem define prioridade)
 const INTENT_KEYWORDS: Array<[string, string[]]> = [
   // PRIORIDADE 0: Solicitar revisão/atendente humano (MÁXIMA prioridade)
-  // Obs: manter apenas gatilhos EXPLÍCITOS. Evitar frases ambíguas tipo "confirma pra mim".
-  ["review", ["revisar", "revisão", "revisao", "atendente", "humano", "falar com alguém", "falar com alguem", "atendimento humano", "quero revisar", "quero atendente", "chamar atendente", "falar com atendente"]],
+  ["review", ["revisar", "revisão", "revisao", "atendente", "humano", "pessoa", "falar com alguém", "falar com alguem", "atendimento humano", "quero revisar", "conferir pedido", "confirma pra mim"]],
   // PRIORIDADE 1: Finalizar/Fechar (mais importante)
   ["finish", ["finalizar", "finaliza", "fechar", "fecha", "concluir", "só isso", "so isso", "é isso", "e isso", "pronto", "acabou", "terminei", "pode finalizar", "pode fechar", "fecha o pedido", "finaliza o pedido", "finalizar pedido", "fechar pedido"]],
   // PRIORIDADE 2: Confirmação
@@ -144,7 +143,6 @@ function inferCartItemsFromMessage(
   products: Product[]
 ): Array<{ product: Product; quantity: number }> {
   const msg = normalizeText(message);
-  const msgAlt = msg.replace(/-/g, " ");
   if (!msg || msg.length < 3) return [];
 
   // Evita inferência em mensagens que claramente são checkout/controle
@@ -156,24 +154,16 @@ function inferCartItemsFromMessage(
 
   for (const p of products) {
     const pn = normalizeText(p.name);
-    // Ajuda em produtos com hífen (ex.: "coca-cola") vs fala comum ("coca cola")
-    const pnAlt = pn.replace(/-/g, " ");
     if (!pn) continue;
 
-    const directHit = msg.includes(pn) || msgAlt.includes(pnAlt);
-    const reverseHit = (pn.includes(msg) || pnAlt.includes(msgAlt)) && msg.length >= 4;
+    const directHit = msg.includes(pn);
+    const reverseHit = pn.includes(msg) && msg.length >= 4;
     if (!directHit && !reverseHit) continue;
 
     // Tenta inferir quantidade (ex.: "2 x-tudo")
     const firstWord = pn.split(" ")[0];
-    const firstWordAlt = pnAlt.split(" ")[0];
-
     const qtyRe = new RegExp(`\\b(\\d+)\\s*(?:x\\s*)?(?:${escapeRegExp(firstWord)})\\b`);
-    const qtyReAlt = firstWordAlt && firstWordAlt !== firstWord
-      ? new RegExp(`\\b(\\d+)\\s*(?:x\\s*)?(?:${escapeRegExp(firstWordAlt)})\\b`)
-      : null;
-
-    const qtyMatch = msg.match(qtyRe) || (qtyReAlt ? msgAlt.match(qtyReAlt) : null);
+    const qtyMatch = msg.match(qtyRe);
     const qty = qtyMatch ? Math.max(1, Number(qtyMatch[1])) : 1;
 
     matches.push({ product: p, quantity: qty, score: pn.length });
@@ -276,6 +266,8 @@ interface ConversationContext {
   conversationHistory?: Array<{ role: "user" | "assistant"; content: string; inputType?: "text" | "audio" }>;
   // Troco necessário (se pagamento em dinheiro)
   changeFor?: number;
+  // Contador de tentativas de confirmação com dados faltantes (para auto-revisão)
+  confirmAttempts?: number;
 }
 
 interface Category {
@@ -655,42 +647,13 @@ async function sendWhatsAppAudio(phone: string, audioBuffer: ArrayBuffer): Promi
 
 // Envia resposta de voz (TTS) para o cliente
 async function sendVoiceResponse(phone: string, text: string): Promise<void> {
-  const numberToPt = (n: number): string => {
-    const map: Record<number, string> = {
-      1: "uma",
-      2: "duas",
-      3: "três",
-      4: "quatro",
-      5: "cinco",
-      6: "seis",
-      7: "sete",
-      8: "oito",
-      9: "nove",
-      10: "dez",
-    };
-    return map[n] ?? String(n);
-  };
-
-  const formatQuantitiesForTTS = (input: string): string => {
-    // Troca "2x Coca-Cola" -> "duas unidades de Coca-Cola" (evita o TTS falar "dois xis")
-    return input.replace(/\b(\d+)\s*x\s*/gi, (_m, numStr) => {
-      const n = Number(numStr);
-      if (!Number.isFinite(n) || n <= 0) return "";
-      const w = numberToPt(n);
-      return `${w} ${n === 1 ? "unidade de" : "unidades de"} `;
-    });
-  };
-
   // Remove emojis e formatação para TTS
-  const cleanText = formatQuantitiesForTTS(
-    text
+  const cleanText = text
     .replace(/\*([^*]+)\*/g, "$1") // Remove negrito
     .replace(/[🎤📝🛒💰✅❌📋🍔🍟👋🎉📦💛🔥🏃🛵💳💵📱📍🗑️😕🤔😊😋👨‍🍳📥📭🔄❓]/g, "")
-    .replace(/[•]/g, "")
     .replace(/\n{2,}/g, ". ")
     .replace(/\n/g, ", ")
-    .trim()
-  );
+    .trim();
 
   if (!cleanText || cleanText.length < 5) return;
 
@@ -913,19 +876,16 @@ Responda APENAS com JSON:
 function getAttendantSystemPrompt(products: Product[], context: ConversationContext, inputType: "text" | "audio"): string {
   const productList = products.map(p => `- ${p.name}: R$ ${p.price.toFixed(2)}${p.description ? ` (${p.description})` : ""}`).join("\n");
   
-  // Garante que cart existe
-  const cart = context.cart || [];
-  
-  const cartSummary = cart.length > 0
-    ? cart.map(item => `${item.quantity}x ${item.productName} - R$ ${(item.price * item.quantity).toFixed(2)}`).join("\n")
+  const cartSummary = context.cart.length > 0
+    ? context.cart.map(item => `${item.quantity}x ${item.productName} - R$ ${(item.price * item.quantity).toFixed(2)}`).join("\n")
     : "Vazio";
   
-  const cartTotal = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
+  const cartTotal = context.cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
   const deliveryFee = context.orderType === "DELIVERY" ? 5 : 0;
 
   // Determina qual dado está faltando para guiar a conversa
   const missingData: string[] = [];
-  if (cart.length === 0) missingData.push("ITENS DO PEDIDO");
+  if (context.cart.length === 0) missingData.push("ITENS DO PEDIDO");
   if (!isValidCustomerName(context.customerName)) missingData.push("NOME");
   if (!context.orderType) missingData.push("TIPO (entrega ou retirada)");
   if (context.orderType === "DELIVERY" && !context.deliveryAddress) missingData.push("ENDEREÇO");
@@ -949,7 +909,7 @@ REGRAS DE COMUNICAÇÃO (MUITO IMPORTANTE):
 - A confirmação REAL vem do sistema, não de você
 - Se o cliente pedir para confirmar e faltarem dados, PERGUNTE o dado faltante
 - ${missingDataInfo}
-- Se o cliente pedir explicitamente para "revisar" ou "falar com atendente", use action "request_review"
+- Quando faltam dados e o cliente insiste, ofereça a opção de dizer "REVISAR" para registrar e conferirmos depois
 
 CARDÁPIO DISPONÍVEL:
 ${productList}
@@ -966,16 +926,16 @@ ${context.changeFor ? `- Troco para: R$ ${context.changeFor.toFixed(2)}` : ""}
 FORMAS DE PAGAMENTO ACEITAS: PIX, Cartão, Dinheiro
 
 FLUXO DE ATENDIMENTO OBRIGATÓRIO (siga na ordem):
-1. PRIMEIRO: Se não tem nome do cliente, pergunte o nome antes de qualquer coisa! Use action "set_name"
-2. Quando cliente mencionar produtos: use action "add_to_cart" com os itens
-3. Depois de adicionar: pergunte se quer mais alguma coisa
-4. Quando disser que é só isso/finalizar: pergunte entrega ou retirada + use action "set_delivery" ou "set_pickup"
-5. Se entrega: peça endereço e use action "set_address"
-6. Pergunte forma de pagamento e use action "set_payment"
+1. Quando cliente mencionar produtos: use action "add_to_cart" com os itens
+2. Depois de adicionar: pergunte se quer mais alguma coisa
+3. Quando disser que é só isso/finalizar: pergunte entrega ou retirada + use action "set_delivery" ou "set_pickup"
+4. Se entrega: peça endereço e use action "set_address"
+5. Pergunte forma de pagamento e use action "set_payment"
+6. Pergunte o nome do cliente e use action "set_name"
 7. SOMENTE COM TODOS OS DADOS COMPLETOS, use action "confirm_order"
 
 PRÓXIMO PASSO RECOMENDADO:
-${!isValidCustomerName(context.customerName) ? "PERGUNTE O NOME DO CLIENTE PRIMEIRO!" : (missingData.length > 0 ? `Pergunte: ${missingData[0]}` : "Pode confirmar o pedido com action confirm_order")}
+${missingData.length > 0 ? `Pergunte: ${missingData[0]}` : "Pode confirmar o pedido com action confirm_order"}
 
 REGRA CRÍTICA PARA CONFIRMAR PEDIDO:
 - NUNCA use "confirm_order" se o carrinho estiver vazio
@@ -1292,8 +1252,8 @@ async function processWithAI(
           if (parsed.action === "confirm_order") {
             if (actionResult.sentToReview && actionResult.orderNumber) {
               // Pedido foi para revisão
-              textReply = `📋 Seu pedido foi registrado como #${actionResult.orderNumber} e foi encaminhado para conferência com um atendente. Ele pode entrar em contato se precisar de mais informações.`;
-              voiceReply = `Seu pedido foi registrado com número ${actionResult.orderNumber} e foi encaminhado para conferência com um atendente. Ele pode entrar em contato se precisar de mais informações.`;
+              textReply = `📋 Seu pedido foi registrado como #${actionResult.orderNumber} e está *EM REVISÃO*. Um atendente vai conferir e entrar em contato se precisar de mais informações!`;
+              voiceReply = `Seu pedido foi registrado com número ${actionResult.orderNumber} e está em revisão. Um atendente vai conferir e entrar em contato se precisar de mais informações!`;
             } else if (actionResult.orderNumber) {
               textReply = `✅ Pedido confirmado! Número #${actionResult.orderNumber}. Vou te atualizando por aqui.`;
               voiceReply = `Perfeito! Seu pedido ficou confirmado. Número ${actionResult.orderNumber}. Vou te atualizando por aqui.`;
@@ -1303,30 +1263,30 @@ async function processWithAI(
                 textReply = "Antes de confirmar, me diz quais itens você quer no pedido (ex.: 1 X-Tudo e 1 Coca-Cola Lata).";
                 voiceReply = "Antes de confirmar, me diz quais itens você quer no pedido. Por exemplo: um X-Tudo e uma Coca-Cola lata.";
               } else if (blocked === "missing_name") {
-                textReply = "Show! Pra confirmar, me diz seu nome.";
-                voiceReply = "Show! Pra eu confirmar o pedido, me diz seu nome.";
+                textReply = "Show! Pra confirmar, me diz seu nome. Ou diga *REVISAR* pra gente registrar e conferir depois.";
+                voiceReply = "Show! Pra eu confirmar o pedido, me diz seu nome. Ou fale revisar pra gente registrar e conferir depois.";
               } else if (blocked === "missing_order_type") {
-                textReply = "Vai ser entrega ou retirada?";
-                voiceReply = "Vai ser entrega ou retirada?";
+                textReply = "Vai ser entrega ou retirada? Ou diga *REVISAR* pra gente registrar e conferir depois.";
+                voiceReply = "Vai ser entrega ou retirada? Ou fale revisar pra gente registrar e conferir depois.";
               } else if (blocked === "missing_address") {
-                textReply = "Perfeito. Me passa seu endereço completo, por favor (rua, número, bairro).";
-                voiceReply = "Perfeito. Me passa seu endereço completo.";
+                textReply = "Perfeito. Me passa seu endereço completo, por favor (rua, número, bairro). Ou diga *REVISAR* pra gente registrar e conferir depois.";
+                voiceReply = "Perfeito. Me passa seu endereço completo. Ou fale revisar pra gente registrar e conferir depois.";
               } else if (blocked === "missing_payment") {
-                textReply = "Como você prefere pagar: Pix, cartão ou dinheiro?";
-                voiceReply = "Como você prefere pagar: Pix, cartão ou dinheiro?";
+                textReply = "Como você prefere pagar: Pix, cartão ou dinheiro? Ou diga *REVISAR* pra gente registrar e conferir depois.";
+                voiceReply = "Como você prefere pagar: Pix, cartão ou dinheiro? Ou fale revisar pra gente registrar e conferir depois.";
               } else if (blocked === "sent_to_review") {
                 // Já tratado acima
               } else {
-                textReply = "Tive um probleminha pra confirmar seu pedido agora. Pode tentar de novo?";
-                voiceReply = "Tive um probleminha pra confirmar seu pedido agora. Pode tentar de novo?";
+                textReply = "Tive um probleminha pra confirmar seu pedido agora. Pode tentar de novo ou dizer *REVISAR*?";
+                voiceReply = "Tive um probleminha pra confirmar seu pedido agora. Pode tentar de novo ou dizer revisar?";
               }
             }
           }
 
           // Trata ação de request_review
           if (parsed.action === "request_review" && actionResult.orderNumber) {
-            textReply = `📋 Seu pedido foi registrado como #${actionResult.orderNumber} e foi encaminhado para conferência com um atendente. Ele já vai verificar e, se precisar, entra em contato.`;
-            voiceReply = `Seu pedido foi registrado com número ${actionResult.orderNumber} e foi encaminhado para conferência com um atendente. Ele já vai verificar e, se precisar, entra em contato.`;
+            textReply = `📋 Seu pedido foi registrado como #${actionResult.orderNumber} e está *EM REVISÃO*. Um atendente vai conferir e entrar em contato!`;
+            voiceReply = `Seu pedido foi registrado com número ${actionResult.orderNumber} e está em revisão. Um atendente vai conferir e entrar em contato!`;
           }
         }
 
@@ -1376,8 +1336,8 @@ async function processWithAI(
             actionSentToReview = autoConfirm.sentToReview || false;
 
             if (actionSentToReview && actionOrderNumber) {
-              textReply = `📋 Seu pedido foi registrado como #${actionOrderNumber} e foi encaminhado para conferência com um atendente. Ele pode entrar em contato se precisar de mais informações.`;
-              voiceReply = `Seu pedido foi registrado com número ${actionOrderNumber} e foi encaminhado para conferência com um atendente. Ele pode entrar em contato se precisar de mais informações.`;
+              textReply = `📋 Seu pedido foi registrado como #${actionOrderNumber} e está *EM REVISÃO*. Um atendente vai conferir e entrar em contato se precisar de mais informações!`;
+              voiceReply = `Seu pedido foi registrado com número ${actionOrderNumber} e está em revisão. Um atendente vai conferir e entrar em contato se precisar de mais informações!`;
             } else if (actionOrderNumber) {
               textReply = `✅ Pedido confirmado! Número #${actionOrderNumber}. Vou te atualizando por aqui.`;
               voiceReply = `Perfeito! Seu pedido ficou confirmado. Número ${actionOrderNumber}. Vou te atualizando por aqui.`;
@@ -1499,7 +1459,7 @@ async function processWithAI(
       newContext = autoConfirm.newContext;
 
       if (autoConfirm.sentToReview && autoConfirm.orderNumber) {
-        safeReply = `📋 Seu pedido foi registrado como #${autoConfirm.orderNumber} e foi encaminhado para conferência com um atendente. Ele pode entrar em contato se precisar de mais informações.`;
+        safeReply = `📋 Seu pedido foi registrado como #${autoConfirm.orderNumber} e está *EM REVISÃO*. Um atendente vai conferir e entrar em contato se precisar de mais informações!`;
       } else if (autoConfirm.orderNumber) {
         safeReply = `✅ Pedido confirmado! Número #${autoConfirm.orderNumber}. Vou te atualizando por aqui.`;
       } else if (autoConfirm.confirmOrderBlocked) {
@@ -1635,7 +1595,7 @@ async function processAIAction(
       
     case "confirm_order":
       // Valida que temos dados suficientes para criar o pedido
-      console.log(`[AI Action] confirm_order - Carrinho: ${newContext.cart.length} itens, Nome: ${newContext.customerName}, Tipo: ${newContext.orderType}, Pagamento: ${newContext.paymentMethod}`);
+      console.log(`[AI Action] confirm_order - Carrinho: ${newContext.cart.length} itens, Nome: ${newContext.customerName}, Tipo: ${newContext.orderType}, Pagamento: ${newContext.paymentMethod}, Tentativas: ${newContext.confirmAttempts || 0}`);
       
       // Se action_data tiver itens, adiciona ao carrinho primeiro
       if (actionData.items && Array.isArray(actionData.items) && actionData.items.length > 0) {
@@ -1701,11 +1661,29 @@ async function processAIAction(
         (newContext.orderType === "DELIVERY" && !newContext.deliveryAddress) ||
         !newContext.paymentMethod;
       
-      // Se tem dados faltantes, retorna erro específico (SEM auto-revisão)
+      // Se tem dados faltantes, incrementa contador de tentativas
       if (hasMissingData) {
-        console.log(`[AI Action] Dados faltantes para confirmar pedido`);
+        newContext.confirmAttempts = (newContext.confirmAttempts || 0) + 1;
+        console.log(`[AI Action] Dados faltantes, tentativa ${newContext.confirmAttempts}`);
         
-        // Retorna o erro específico para que a IA pergunte o dado faltante
+        // AUTO-REVISÃO: Se já tentou 2+ vezes E tem pelo menos itens no carrinho, registra como revisão
+        if (newContext.confirmAttempts >= 2 && newContext.cart.length > 0) {
+          console.log("[AI Action] Auto-revisão ativada: registrando pedido incompleto para revisão");
+          orderNumber = (await createOrder(supabase, newContext, phone, inputType, true)) ?? undefined;
+          if (orderNumber) {
+            sentToReview = true;
+            confirmOrderBlocked = "sent_to_review";
+            console.log(`[AI Action] Pedido #${orderNumber} criado como REVISÃO`);
+            // Limpa contexto
+            newContext = { 
+              cart: [],
+              conversationHistory: newContext.conversationHistory 
+            };
+          }
+          break;
+        }
+        
+        // Ainda não atingiu limite, retorna o erro específico
         if (newContext.cart.length === 0) {
           confirmOrderBlocked = "missing_items";
         } else if (!isValidCustomerName(newContext.customerName)) {
