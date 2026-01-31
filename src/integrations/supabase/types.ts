@@ -44,25 +44,31 @@ export type Database = {
       conversation_sessions: {
         Row: {
           context_json: Json | null
+          conversation_summary: string | null
           created_at: string | null
           current_state: string
           id: string
+          last_summary_at: string | null
           phone_number: string
           updated_at: string | null
         }
         Insert: {
           context_json?: Json | null
+          conversation_summary?: string | null
           created_at?: string | null
           current_state?: string
           id?: string
+          last_summary_at?: string | null
           phone_number: string
           updated_at?: string | null
         }
         Update: {
           context_json?: Json | null
+          conversation_summary?: string | null
           created_at?: string | null
           current_state?: string
           id?: string
+          last_summary_at?: string | null
           phone_number?: string
           updated_at?: string | null
         }
@@ -170,6 +176,33 @@ export type Database = {
           subtotal?: number
           total?: number
           updated_at?: string | null
+        }
+        Relationships: []
+      }
+      pending_messages: {
+        Row: {
+          created_at: string
+          id: string
+          input_type: string
+          message_content: string
+          message_id: string
+          phone_number: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          input_type?: string
+          message_content: string
+          message_id: string
+          phone_number: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          input_type?: string
+          message_content?: string
+          message_id?: string
+          phone_number?: string
         }
         Relationships: []
       }
