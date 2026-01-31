@@ -51,12 +51,12 @@ const getSupabase = () => {
 
 // Envia mensagem via Evolution API
 async function sendWhatsAppMessage(phone: string, message: string) {
-  const evolutionUrl = Deno.env.get("EVOLUTION_API_URL");
+  let evolutionUrl = Deno.env.get("EVOLUTION_API_URL");
   const evolutionKey = Deno.env.get("EVOLUTION_API_KEY");
   const instanceName = Deno.env.get("EVOLUTION_INSTANCE_NAME");
 
   console.log("Enviando mensagem para:", phone);
-  console.log("Evolution URL:", evolutionUrl ? "configurada" : "NÃO configurada");
+  console.log("Evolution URL raw:", evolutionUrl);
   console.log("Evolution Key:", evolutionKey ? "configurada" : "NÃO configurada");
   console.log("Instance Name:", instanceName || "NÃO configurada");
 
@@ -65,8 +65,11 @@ async function sendWhatsAppMessage(phone: string, message: string) {
     return;
   }
 
+  // Remove trailing slash e /manager se existir
+  evolutionUrl = evolutionUrl.replace(/\/manager\/?$/, "").replace(/\/$/, "");
+  
   const url = `${evolutionUrl}/message/sendText/${instanceName}`;
-  console.log("URL de envio:", url);
+  console.log("URL de envio (limpa):", url);
 
   try {
     const response = await fetch(url, {
