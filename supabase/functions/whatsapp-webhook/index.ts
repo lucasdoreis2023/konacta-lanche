@@ -266,8 +266,6 @@ interface ConversationContext {
   conversationHistory?: Array<{ role: "user" | "assistant"; content: string; inputType?: "text" | "audio" }>;
   // Troco necessário (se pagamento em dinheiro)
   changeFor?: number;
-  // Contador de tentativas de confirmação com dados faltantes (para auto-revisão)
-  confirmAttempts?: number;
 }
 
 interface Category {
@@ -909,7 +907,7 @@ REGRAS DE COMUNICAÇÃO (MUITO IMPORTANTE):
 - A confirmação REAL vem do sistema, não de você
 - Se o cliente pedir para confirmar e faltarem dados, PERGUNTE o dado faltante
 - ${missingDataInfo}
-- Quando faltam dados e o cliente insiste, ofereça a opção de dizer "REVISAR" para registrar e conferirmos depois
+- Se o cliente pedir explicitamente para "revisar" ou "falar com atendente", use action "request_review"
 
 CARDÁPIO DISPONÍVEL:
 ${productList}
@@ -926,16 +924,16 @@ ${context.changeFor ? `- Troco para: R$ ${context.changeFor.toFixed(2)}` : ""}
 FORMAS DE PAGAMENTO ACEITAS: PIX, Cartão, Dinheiro
 
 FLUXO DE ATENDIMENTO OBRIGATÓRIO (siga na ordem):
-1. Quando cliente mencionar produtos: use action "add_to_cart" com os itens
-2. Depois de adicionar: pergunte se quer mais alguma coisa
-3. Quando disser que é só isso/finalizar: pergunte entrega ou retirada + use action "set_delivery" ou "set_pickup"
-4. Se entrega: peça endereço e use action "set_address"
-5. Pergunte forma de pagamento e use action "set_payment"
-6. Pergunte o nome do cliente e use action "set_name"
+1. PRIMEIRO: Se não tem nome do cliente, pergunte o nome antes de qualquer coisa! Use action "set_name"
+2. Quando cliente mencionar produtos: use action "add_to_cart" com os itens
+3. Depois de adicionar: pergunte se quer mais alguma coisa
+4. Quando disser que é só isso/finalizar: pergunte entrega ou retirada + use action "set_delivery" ou "set_pickup"
+5. Se entrega: peça endereço e use action "set_address"
+6. Pergunte forma de pagamento e use action "set_payment"
 7. SOMENTE COM TODOS OS DADOS COMPLETOS, use action "confirm_order"
 
 PRÓXIMO PASSO RECOMENDADO:
-${missingData.length > 0 ? `Pergunte: ${missingData[0]}` : "Pode confirmar o pedido com action confirm_order"}
+${!isValidCustomerName(context.customerName) ? "PERGUNTE O NOME DO CLIENTE PRIMEIRO!" : (missingData.length > 0 ? `Pergunte: ${missingData[0]}` : "Pode confirmar o pedido com action confirm_order")}
 
 REGRA CRÍTICA PARA CONFIRMAR PEDIDO:
 - NUNCA use "confirm_order" se o carrinho estiver vazio
@@ -1263,17 +1261,17 @@ async function processWithAI(
                 textReply = "Antes de confirmar, me diz quais itens você quer no pedido (ex.: 1 X-Tudo e 1 Coca-Cola Lata).";
                 voiceReply = "Antes de confirmar, me diz quais itens você quer no pedido. Por exemplo: um X-Tudo e uma Coca-Cola lata.";
               } else if (blocked === "missing_name") {
-                textReply = "Show! Pra confirmar, me diz seu nome. Ou diga *REVISAR* pra gente registrar e conferir depois.";
-                voiceReply = "Show! Pra eu confirmar o pedido, me diz seu nome. Ou fale revisar pra gente registrar e conferir depois.";
+                textReply = "Show! Pra confirmar, me diz seu nome.";
+                voiceReply = "Show! Pra eu confirmar o pedido, me diz seu nome.";
               } else if (blocked === "missing_order_type") {
-                textReply = "Vai ser entrega ou retirada? Ou diga *REVISAR* pra gente registrar e conferir depois.";
-                voiceReply = "Vai ser entrega ou retirada? Ou fale revisar pra gente registrar e conferir depois.";
+                textReply = "Vai ser entrega ou retirada?";
+                voiceReply = "Vai ser entrega ou retirada?";
               } else if (blocked === "missing_address") {
-                textReply = "Perfeito. Me passa seu endereço completo, por favor (rua, número, bairro). Ou diga *REVISAR* pra gente registrar e conferir depois.";
-                voiceReply = "Perfeito. Me passa seu endereço completo. Ou fale revisar pra gente registrar e conferir depois.";
+                textReply = "Perfeito. Me passa seu endereço completo, por favor (rua, número, bairro).";
+                voiceReply = "Perfeito. Me passa seu endereço completo.";
               } else if (blocked === "missing_payment") {
-                textReply = "Como você prefere pagar: Pix, cartão ou dinheiro? Ou diga *REVISAR* pra gente registrar e conferir depois.";
-                voiceReply = "Como você prefere pagar: Pix, cartão ou dinheiro? Ou fale revisar pra gente registrar e conferir depois.";
+                textReply = "Como você prefere pagar: Pix, cartão ou dinheiro?";
+                voiceReply = "Como você prefere pagar: Pix, cartão ou dinheiro?";
               } else if (blocked === "sent_to_review") {
                 // Já tratado acima
               } else {
@@ -1595,7 +1593,7 @@ async function processAIAction(
       
     case "confirm_order":
       // Valida que temos dados suficientes para criar o pedido
-      console.log(`[AI Action] confirm_order - Carrinho: ${newContext.cart.length} itens, Nome: ${newContext.customerName}, Tipo: ${newContext.orderType}, Pagamento: ${newContext.paymentMethod}, Tentativas: ${newContext.confirmAttempts || 0}`);
+      console.log(`[AI Action] confirm_order - Carrinho: ${newContext.cart.length} itens, Nome: ${newContext.customerName}, Tipo: ${newContext.orderType}, Pagamento: ${newContext.paymentMethod}`);
       
       // Se action_data tiver itens, adiciona ao carrinho primeiro
       if (actionData.items && Array.isArray(actionData.items) && actionData.items.length > 0) {
@@ -1661,29 +1659,11 @@ async function processAIAction(
         (newContext.orderType === "DELIVERY" && !newContext.deliveryAddress) ||
         !newContext.paymentMethod;
       
-      // Se tem dados faltantes, incrementa contador de tentativas
+      // Se tem dados faltantes, retorna erro específico (SEM auto-revisão)
       if (hasMissingData) {
-        newContext.confirmAttempts = (newContext.confirmAttempts || 0) + 1;
-        console.log(`[AI Action] Dados faltantes, tentativa ${newContext.confirmAttempts}`);
+        console.log(`[AI Action] Dados faltantes para confirmar pedido`);
         
-        // AUTO-REVISÃO: Se já tentou 2+ vezes E tem pelo menos itens no carrinho, registra como revisão
-        if (newContext.confirmAttempts >= 2 && newContext.cart.length > 0) {
-          console.log("[AI Action] Auto-revisão ativada: registrando pedido incompleto para revisão");
-          orderNumber = (await createOrder(supabase, newContext, phone, inputType, true)) ?? undefined;
-          if (orderNumber) {
-            sentToReview = true;
-            confirmOrderBlocked = "sent_to_review";
-            console.log(`[AI Action] Pedido #${orderNumber} criado como REVISÃO`);
-            // Limpa contexto
-            newContext = { 
-              cart: [],
-              conversationHistory: newContext.conversationHistory 
-            };
-          }
-          break;
-        }
-        
-        // Ainda não atingiu limite, retorna o erro específico
+        // Retorna o erro específico para que a IA pergunte o dado faltante
         if (newContext.cart.length === 0) {
           confirmOrderBlocked = "missing_items";
         } else if (!isValidCustomerName(newContext.customerName)) {
