@@ -24,25 +24,34 @@ type ConversationState =
   | "VOICE_ORDER_CONFIRM"
   | "VOICE_ORDERING"; // Novo estado para conversa por voz
 
-// Palavras-chave para detecção de intenção
-const INTENT_KEYWORDS = {
-  menu: ["cardápio", "cardapio", "menu", "opções", "opcoes", "ver produtos", "o que tem", "quais produtos"],
-  startOrder: ["pedido", "pedir", "quero", "gostaria", "lanche", "comer", "comprar", "fazer pedido", "realizar pedido"],
-  status: ["status", "meu pedido", "acompanhar", "onde está", "onde esta", "cadê", "cade", "andamento", "rastrear"],
-  greeting: ["oi", "olá", "ola", "bom dia", "boa tarde", "boa noite", "e aí", "e ai", "hello"],
-  confirm: ["sim", "isso", "correto", "confirmar", "confirmo", "pode ser", "ok", "beleza", "certo"],
-  deny: ["não", "nao", "errado", "cancelar", "refazer", "trocar"],
-  finish: ["finalizar", "fechar", "concluir", "só isso", "so isso", "é isso", "e isso", "pronto", "acabou", "terminei"],
-};
+// Palavras-chave para detecção de intenção (ordem define prioridade)
+const INTENT_KEYWORDS: Array<[string, string[]]> = [
+  // PRIORIDADE 1: Finalizar/Fechar (mais importante)
+  ["finish", ["finalizar", "finaliza", "fechar", "fecha", "concluir", "só isso", "so isso", "é isso", "e isso", "pronto", "acabou", "terminei", "pode finalizar", "pode fechar", "fecha o pedido", "finaliza o pedido", "finalizar pedido", "fechar pedido"]],
+  // PRIORIDADE 2: Confirmação
+  ["confirm", ["sim", "isso mesmo", "correto", "confirmar", "confirmo", "pode ser", "beleza", "certo", "isso aí", "isso ai", "exato"]],
+  // PRIORIDADE 3: Negação
+  ["deny", ["não", "nao", "errado", "cancelar", "refazer", "trocar", "cancela"]],
+  // PRIORIDADE 4: Status
+  ["status", ["status", "meu pedido está", "meu pedido esta", "acompanhar", "onde está meu", "onde esta meu", "cadê meu", "cade meu", "andamento", "rastrear"]],
+  // PRIORIDADE 5: Cardápio
+  ["menu", ["cardápio", "cardapio", "menu", "ver produtos", "o que tem", "quais produtos", "mostrar produtos"]],
+  // PRIORIDADE 6: Saudação/Início de pedido
+  ["greeting", ["oi", "olá", "ola", "bom dia", "boa tarde", "boa noite", "e aí", "e ai", "hello", "opa"]],
+  // PRIORIDADE 7: Intenção de fazer pedido (mais genérico)
+  ["startOrder", ["quero pedir", "gostaria de pedir", "fazer um pedido", "realizar pedido", "quero um", "quero uma", "me vê", "me ve", "me dá", "me da", "manda um", "traz um"]],
+];
 
 // Detecta intenção a partir do texto (transcrição ou mensagem)
 function detectIntent(text: string): { intent: string; confidence: number } {
-  const textLower = text.toLowerCase().trim();
+  const textLower = text.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
   
-  // Prioridade: finish > confirm > deny > status > menu > startOrder > greeting
-  for (const [intent, keywords] of Object.entries(INTENT_KEYWORDS)) {
+  // Itera na ordem de prioridade (primeiro match ganha)
+  for (const [intent, keywords] of INTENT_KEYWORDS) {
     for (const keyword of keywords) {
-      if (textLower.includes(keyword)) {
+      const keywordNorm = keyword.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+      if (textLower.includes(keywordNorm)) {
+        console.log(`[detectIntent] Match: "${keyword}" -> ${intent}`);
         return { intent, confidence: 1 };
       }
     }
