@@ -463,8 +463,127 @@ async function sendVoiceResponse(phone: string, text: string): Promise<void> {
   }
 }
 
-// Interpreta pedido usando Lovable AI
+// Interpreta pedido usando DeepSeek via OpenRouter
 async function interpretVoiceOrder(
+  transcript: string,
+  products: Product[]
+): Promise<{ items: Array<{ name: string; quantity: number; productId?: string; price?: number }>; understood: boolean }> {
+  const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY");
+  
+  // Fallback para Lovable AI se OpenRouter não estiver configurado
+  if (!OPENROUTER_API_KEY) {
+    console.log("OpenRouter não configurado, usando Lovable AI como fallback");
+    return interpretVoiceOrderFallback(transcript, products);
+  }
+
+  const productList = products.map(p => `- ${p.name} (R$ ${p.price.toFixed(2)})`).join("\n");
+
+  const systemPrompt = `Você é um assistente especializado em interpretar pedidos de uma lanchonete brasileira.
+
+CARDÁPIO DISPONÍVEL:
+${productList}
+
+OBJETIVO: Extrair itens de pedido da mensagem do cliente com máxima precisão.
+
+REGRAS DE INTERPRETAÇÃO:
+1. Identifique produtos mesmo com variações de pronúncia, gírias ou erros de digitação
+   - "x-tudo" = "X-Tudo"
+   - "coca", "coquinha" = "Coca-Cola"
+   - "refri" = qualquer refrigerante
+   - "hamburguer", "lanche" = procure o mais similar no cardápio
+2. Extraia quantidades (padrão: 1)
+   - "dois", "2", "um par" = 2
+   - "três", "3" = 3
+3. Se o cliente mencionar algo que não existe, ignore esse item
+4. Se a mensagem não contém pedido de produto, retorne items vazio
+
+FORMATO DE RESPOSTA (JSON VÁLIDO):
+{
+  "items": [{"name": "Nome Exato do Cardápio", "quantity": 1}],
+  "understood": true,
+  "reasoning": "Breve explicação do que entendi"
+}`;
+
+  try {
+    console.log(`[DeepSeek] Interpretando: "${transcript}"`);
+    
+    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://lovable.dev",
+        "X-Title": "WhatsApp Bot - Lanchonete"
+      },
+      body: JSON.stringify({
+        model: "deepseek/deepseek-chat",
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: `Mensagem do cliente: "${transcript}"` }
+        ],
+        temperature: 0.2,
+        max_tokens: 500
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error("Erro OpenRouter/DeepSeek:", response.status, errorText);
+      // Fallback para Lovable AI
+      return interpretVoiceOrderFallback(transcript, products);
+    }
+
+    const result = await response.json();
+    const content = result.choices?.[0]?.message?.content || "";
+    
+    console.log(`[DeepSeek] Resposta: ${content}`);
+    
+    // Extrai JSON da resposta
+    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      const parsed = JSON.parse(jsonMatch[0]);
+      
+      if (parsed.reasoning) {
+        console.log(`[DeepSeek] Raciocínio: ${parsed.reasoning}`);
+      }
+      
+      // Associa produtos reais aos itens identificados
+      const itemsWithProducts = parsed.items.map((item: { name: string; quantity: number }) => {
+        // Busca por correspondência mais flexível
+        const matchedProduct = products.find(p => {
+          const pName = p.name.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+          const iName = item.name.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+          return pName.includes(iName) || iName.includes(pName) || 
+                 pName.split(" ").some(word => iName.includes(word) && word.length > 3);
+        });
+        
+        if (matchedProduct) {
+          return {
+            name: matchedProduct.name,
+            quantity: item.quantity,
+            productId: matchedProduct.id,
+            price: matchedProduct.price
+          };
+        }
+        return item;
+      }).filter((item: { productId?: string }) => item.productId);
+      
+      return {
+        items: itemsWithProducts,
+        understood: parsed.understood && itemsWithProducts.length > 0
+      };
+    }
+    
+    return { items: [], understood: false };
+  } catch (error) {
+    console.error("Erro ao interpretar pedido com DeepSeek:", error);
+    // Fallback para Lovable AI
+    return interpretVoiceOrderFallback(transcript, products);
+  }
+}
+
+// Fallback para Lovable AI caso OpenRouter falhe
+async function interpretVoiceOrderFallback(
   transcript: string,
   products: Product[]
 ): Promise<{ items: Array<{ name: string; quantity: number; productId?: string; price?: number }>; understood: boolean }> {
@@ -477,24 +596,18 @@ async function interpretVoiceOrder(
 
   const productList = products.map(p => `- ${p.name} (R$ ${p.price.toFixed(2)})`).join("\n");
 
-  const systemPrompt = `Você é um assistente de pedidos de uma lanchonete. Analise a transcrição do áudio do cliente e extraia os itens do pedido.
+  const systemPrompt = `Você é um assistente de pedidos de uma lanchonete. Analise a mensagem do cliente e extraia os itens do pedido.
 
 CARDÁPIO DISPONÍVEL:
 ${productList}
 
 REGRAS:
-1. Extraia apenas produtos que existem no cardápio (pode haver variações no nome falado)
-2. Identifique quantidades mencionadas (padrão: 1 se não especificado)
-3. Associe nomes falados aos produtos do cardápio (ex: "x-burguer" pode ser "X-Burger", "refri" pode ser "Refrigerante")
-4. Se o cliente não pedir nada claro, retorne items vazio
+1. Extraia apenas produtos que existem no cardápio
+2. Identifique quantidades (padrão: 1)
+3. Associe nomes falados aos produtos do cardápio
 
-Responda APENAS com um JSON no formato:
-{
-  "items": [
-    {"name": "Nome do Produto no Cardápio", "quantity": 1}
-  ],
-  "understood": true
-}`;
+Responda APENAS com JSON:
+{"items": [{"name": "Nome do Produto", "quantity": 1}], "understood": true}`;
 
   try {
     const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
@@ -507,26 +620,24 @@ Responda APENAS com um JSON no formato:
         model: "google/gemini-3-flash-preview",
         messages: [
           { role: "system", content: systemPrompt },
-          { role: "user", content: `Transcrição do áudio: "${transcript}"` }
+          { role: "user", content: `Mensagem: "${transcript}"` }
         ],
         temperature: 0.3,
       }),
     });
 
     if (!response.ok) {
-      console.error("Erro Lovable AI:", response.status, await response.text());
+      console.error("Erro Lovable AI (fallback):", response.status, await response.text());
       return { items: [], understood: false };
     }
 
     const result = await response.json();
     const content = result.choices?.[0]?.message?.content || "";
     
-    // Extrai JSON da resposta
     const jsonMatch = content.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
       const parsed = JSON.parse(jsonMatch[0]);
       
-      // Associa produtos reais aos itens identificados
       const itemsWithProducts = parsed.items.map((item: { name: string; quantity: number }) => {
         const matchedProduct = products.find(p => 
           p.name.toLowerCase().includes(item.name.toLowerCase()) ||
@@ -542,7 +653,7 @@ Responda APENAS com um JSON no formato:
           };
         }
         return item;
-      }).filter((item: { productId?: string }) => item.productId); // Remove itens não encontrados
+      }).filter((item: { productId?: string }) => item.productId);
       
       return {
         items: itemsWithProducts,
@@ -552,7 +663,7 @@ Responda APENAS com um JSON no formato:
     
     return { items: [], understood: false };
   } catch (error) {
-    console.error("Erro ao interpretar pedido:", error);
+    console.error("Erro ao interpretar pedido (fallback):", error);
     return { items: [], understood: false };
   }
 }
