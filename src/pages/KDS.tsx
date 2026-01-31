@@ -1,19 +1,19 @@
 import { useState, useEffect } from 'react';
-import { Navigate, useNavigate } from 'react-router-dom';
+import { Navigate } from 'react-router-dom';
 import { useOrders } from '@/hooks/useOrders';
 import { useKDSNotifications } from '@/hooks/useKDSNotifications';
 import { OrderCardKDS } from '@/components/kds/OrderCardKDS';
 import { KDSNotificationSettings } from '@/components/kds/KDSNotificationSettings';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Skeleton } from '@/components/ui/skeleton';
+import { BackButton } from '@/components/ui/back-button';
 import { supabase } from '@/integrations/supabase/client';
-import { UtensilsCrossed, RefreshCw, ArrowLeft } from 'lucide-react';
+import { UtensilsCrossed, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { OrderStatus } from '@/types/database';
 import { cn } from '@/lib/utils';
 
 export default function KDS() {
-  const navigate = useNavigate();
   const [filter, setFilter] = useState<'active' | 'all'>('active');
   const [isAdmin, setIsAdmin] = useState<boolean | null>(null);
 
@@ -71,9 +71,7 @@ export default function KDS() {
       <header className="sticky top-0 z-50 border-b bg-background">
         <div className="container mx-auto flex h-16 items-center justify-between px-4">
           <div className="flex items-center gap-2">
-            <Button variant="ghost" size="icon" onClick={() => navigate(-1)}>
-              <ArrowLeft className="h-5 w-5" />
-            </Button>
+            <BackButton to="/admin" />
             <UtensilsCrossed className="h-6 w-6 text-primary" />
             <span className="text-xl font-bold">KDS - Cozinha</span>
           </div>

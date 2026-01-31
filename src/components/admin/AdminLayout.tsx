@@ -1,5 +1,6 @@
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
+import { BackButton } from '@/components/ui/back-button';
 import { supabase } from '@/integrations/supabase/client';
 import { toast } from 'sonner';
 import {
@@ -123,6 +124,7 @@ export function AdminLayout({ children }: AdminLayoutProps) {
           >
             <Menu className="h-5 w-5" />
           </Button>
+          <BackButton />
           <div className="flex items-center gap-2">
             <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary">
               <UtensilsCrossed className="h-4 w-4 text-primary-foreground" />
@@ -130,6 +132,12 @@ export function AdminLayout({ children }: AdminLayoutProps) {
             <span className="font-bold">Admin</span>
           </div>
         </header>
+        
+        {/* Desktop back button */}
+        <div className="hidden lg:flex items-center gap-2 p-4 pb-0">
+          <BackButton />
+          <span className="text-sm text-muted-foreground">Voltar</span>
+        </div>
         <main className="flex-1 p-4 lg:p-6">{children}</main>
       </div>
     </div>
