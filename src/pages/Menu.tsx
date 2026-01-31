@@ -2,6 +2,7 @@ import { useState, useMemo } from 'react';
 import { Header } from '@/components/layout/Header';
 import { CategoryTabs } from '@/components/menu/CategoryTabs';
 import { ProductGrid } from '@/components/menu/ProductGrid';
+import { WhatsAppFloatingButton } from '@/components/WhatsAppFloatingButton';
 import { useCategories } from '@/hooks/useCategories';
 import { useProducts } from '@/hooks/useProducts';
 import { Sparkles } from 'lucide-react';
@@ -64,6 +65,9 @@ export default function Menu() {
           </p>
         </div>
       </footer>
+
+      {/* WhatsApp Floating Button */}
+      <WhatsAppFloatingButton />
     </div>
   );
 }
