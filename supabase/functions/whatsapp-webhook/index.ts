@@ -17,7 +17,8 @@ type ConversationState =
   | "CHECKOUT_TYPE"
   | "CHECKOUT_ADDRESS"
   | "CHECKOUT_PAYMENT"
-  | "CONFIRM";
+  | "CONFIRM"
+  | "AWAITING_ORDER_NUMBER";
 
 interface ConversationContext {
   cart: Array<{ productId: string; productName: string; quantity: number; price: number }>;
@@ -39,6 +40,16 @@ interface Product {
   description: string;
   price: number;
   category_id: string;
+}
+
+interface Order {
+  id: string;
+  order_number: number;
+  status: string;
+  order_type: string;
+  total: number;
+  created_at: string;
+  customer_phone: string;
 }
 
 // Inicializa cliente Supabase
@@ -238,6 +249,52 @@ async function getProductById(
   return data;
 }
 
+// Busca pedidos recentes do cliente pelo telefone
+async function getCustomerOrders(
+  supabase: ReturnType<typeof getSupabase>,
+  phone: string
+): Promise<Order[]> {
+  // Normaliza o telefone para buscar (remove + e espaços)
+  const normalizedPhone = phone.replace(/\D/g, "");
+  
+  const { data } = await supabase
+    .from("orders")
+    .select("id, order_number, status, order_type, total, created_at, customer_phone")
+    .or(`customer_phone.eq.${phone},customer_phone.eq.${normalizedPhone},customer_phone.ilike.%${normalizedPhone.slice(-8)}%`)
+    .not("status", "in", '("ENTREGUE","CANCELADO")')
+    .order("created_at", { ascending: false })
+    .limit(5);
+  
+  return data || [];
+}
+
+// Busca pedido específico por número
+async function getOrderByNumber(
+  supabase: ReturnType<typeof getSupabase>,
+  orderNumber: number
+): Promise<Order | null> {
+  const { data } = await supabase
+    .from("orders")
+    .select("id, order_number, status, order_type, total, created_at, customer_phone")
+    .eq("order_number", orderNumber)
+    .maybeSingle();
+  
+  return data;
+}
+
+// Formata status do pedido para exibição
+function formatOrderStatus(status: string): { emoji: string; label: string; description: string } {
+  const statusMap: Record<string, { emoji: string; label: string; description: string }> = {
+    RECEBIDO: { emoji: "📥", label: "Recebido", description: "Seu pedido foi recebido e está na fila" },
+    EM_PREPARO: { emoji: "👨‍🍳", label: "Em Preparo", description: "Estamos preparando seu pedido" },
+    PRONTO: { emoji: "✅", label: "Pronto", description: "Seu pedido está pronto!" },
+    ENTREGUE: { emoji: "🎉", label: "Entregue", description: "Pedido entregue com sucesso" },
+    CANCELADO: { emoji: "❌", label: "Cancelado", description: "Pedido foi cancelado" },
+  };
+  
+  return statusMap[status] || { emoji: "❓", label: status, description: "Status desconhecido" };
+}
+
 // Cria pedido no banco
 async function createOrder(
   supabase: ReturnType<typeof getSupabase>,
@@ -295,6 +352,38 @@ async function createOrder(
   return order.order_number;
 }
 
+// Verifica se a mensagem é uma consulta de status
+function isStatusQuery(message: string): boolean {
+  const statusKeywords = [
+    "meu pedido", "meus pedidos", "status", "onde está",
+    "onde esta", "cadê", "cade", "acompanhar", "rastrear",
+    "situação", "situacao", "como está", "como esta",
+    "pedido #", "pedido#", "consultar pedido", "ver pedido"
+  ];
+  const msgLower = message.toLowerCase().trim();
+  return statusKeywords.some(keyword => msgLower.includes(keyword));
+}
+
+// Extrai número do pedido da mensagem
+function extractOrderNumber(message: string): number | null {
+  // Procura padrões como "pedido 123", "#123", "número 123", etc
+  const patterns = [
+    /pedido\s*#?\s*(\d+)/i,
+    /#\s*(\d+)/,
+    /n[úu]mero\s*(\d+)/i,
+    /^(\d+)$/
+  ];
+  
+  for (const pattern of patterns) {
+    const match = message.match(pattern);
+    if (match) {
+      return parseInt(match[1]);
+    }
+  }
+  
+  return null;
+}
+
 // Processa mensagem baseado no estado
 async function processMessage(
   supabase: ReturnType<typeof getSupabase>,
@@ -336,6 +425,77 @@ async function processMessage(
     };
   }
 
+  // Comando global para consultar status (funciona em qualquer estado)
+  if (isStatusQuery(message)) {
+    const orders = await getCustomerOrders(supabase, phone);
+    
+    if (orders.length === 0) {
+      return {
+        newState: state,
+        response: "📭 Você não possui pedidos em andamento no momento.\n\nDigite *CARDÁPIO* para fazer um novo pedido!",
+        newContext,
+      };
+    }
+    
+    if (orders.length === 1) {
+      const order = orders[0];
+      const status = formatOrderStatus(order.status);
+      const orderType = order.order_type === "DELIVERY" ? "🛵 Delivery" : "🏃 Retirada";
+      
+      return {
+        newState: state,
+        response: `📦 *STATUS DO PEDIDO #${order.order_number}*\n\n${status.emoji} *${status.label}*\n${status.description}\n\n${orderType}\n💰 Total: ${formatPrice(order.total)}\n\nDigite *CARDÁPIO* para fazer um novo pedido.`,
+        newContext,
+      };
+    }
+    
+    // Múltiplos pedidos - pede para informar o número
+    const ordersList = orders
+      .map(o => {
+        const status = formatOrderStatus(o.status);
+        return `• *#${o.order_number}* - ${status.emoji} ${status.label}`;
+      })
+      .join("\n");
+    
+    return {
+      newState: "AWAITING_ORDER_NUMBER",
+      response: `📦 *SEUS PEDIDOS EM ANDAMENTO*\n\n${ordersList}\n\nDigite o *número do pedido* para ver mais detalhes.\nEx: *${orders[0].order_number}*`,
+      newContext,
+    };
+  }
+
+  // Estado para aguardar número do pedido
+  if (state === "AWAITING_ORDER_NUMBER") {
+    const orderNumber = extractOrderNumber(message);
+    
+    if (orderNumber) {
+      const order = await getOrderByNumber(supabase, orderNumber);
+      
+      if (order) {
+        const status = formatOrderStatus(order.status);
+        const orderType = order.order_type === "DELIVERY" ? "🛵 Delivery" : "🏃 Retirada";
+        
+        return {
+          newState: "WELCOME",
+          response: `📦 *STATUS DO PEDIDO #${order.order_number}*\n\n${status.emoji} *${status.label}*\n${status.description}\n\n${orderType}\n💰 Total: ${formatPrice(order.total)}\n\nDigite *CARDÁPIO* para fazer um novo pedido ou *STATUS* para consultar outro pedido.`,
+          newContext,
+        };
+      }
+      
+      return {
+        newState: "AWAITING_ORDER_NUMBER",
+        response: `❌ Pedido #${orderNumber} não encontrado.\n\nDigite o número correto do pedido ou *CANCELAR* para voltar.`,
+        newContext,
+      };
+    }
+    
+    return {
+      newState: "AWAITING_ORDER_NUMBER",
+      response: "❌ Por favor, informe apenas o *número do pedido*.\nEx: *123* ou *pedido 123*",
+      newContext,
+    };
+  }
+
   switch (state) {
     case "WELCOME": {
       if (["cardapio", "cardápio", "menu", "ver menu", "oi", "olá", "ola"].includes(msgLower)) {
@@ -353,7 +513,7 @@ async function processMessage(
       return {
         newState: "WELCOME",
         response:
-          "Olá! Bem-vindo à nossa lanchonete! 🍔\n\nDigite *CARDÁPIO* para ver nossos produtos ou *CARRINHO* para ver seu pedido.",
+          "Olá! Bem-vindo à nossa lanchonete! 🍔\n\nDigite *CARDÁPIO* para ver nossos produtos,\n*CARRINHO* para ver seu pedido, ou\n*STATUS* para acompanhar seu pedido.",
         newContext,
       };
     }
@@ -676,7 +836,7 @@ async function processMessage(
 
         return {
           newState: "WELCOME",
-          response: `✅ *PEDIDO CONFIRMADO!*\n\n🎉 Seu pedido *#${orderNumber}* foi recebido!\n\nEstamos preparando com carinho. Você receberá atualizações sobre o status.\n\nObrigado pela preferência! 💛\n\nDigite *CARDÁPIO* para fazer um novo pedido.`,
+          response: `✅ *PEDIDO CONFIRMADO!*\n\n🎉 Seu pedido *#${orderNumber}* foi recebido!\n\nEstamos preparando com carinho. Você receberá atualizações sobre o status.\n\n💡 *Dica:* Digite *STATUS* a qualquer momento para acompanhar seu pedido!\n\nObrigado pela preferência! 💛\n\nDigite *CARDÁPIO* para fazer um novo pedido.`,
           newContext,
         };
       }

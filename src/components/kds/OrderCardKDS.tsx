@@ -5,7 +5,7 @@ import { OrderWithItems } from '@/hooks/useOrders';
 import { OrderStatus } from '@/types/database';
 import { supabase } from '@/integrations/supabase/client';
 import { toast } from 'sonner';
-import { Clock, MapPin, Phone, User, ChefHat, Check, X } from 'lucide-react';
+import { Clock, MapPin, Phone, User, ChefHat, Check, X, MessageCircle } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 
@@ -27,10 +27,45 @@ const nextActionLabels: Record<string, { label: string; icon: React.ReactNode }>
   ENTREGUE: { label: 'Entregar', icon: <Check className="h-4 w-4" /> },
 };
 
+// Status que devem enviar notificação ao cliente
+const notifiableStatuses: OrderStatus[] = ['EM_PREPARO', 'PRONTO', 'ENTREGUE', 'CANCELADO'];
+
 export function OrderCardKDS({ order }: OrderCardKDSProps) {
   const config = statusConfig[order.status];
   const nextStatus = config.next;
   const nextAction = nextStatus ? nextActionLabels[nextStatus] : null;
+
+  // Notifica o cliente via WhatsApp sobre mudança de status
+  const notifyCustomer = async (newStatus: OrderStatus) => {
+    // Só notifica se tiver telefone e for do WhatsApp
+    if (!order.customer_phone || order.channel !== 'WHATSAPP') {
+      return;
+    }
+
+    try {
+      const { error } = await supabase.functions.invoke('notify-order-status', {
+        body: {
+          orderId: order.id,
+          orderNumber: order.order_number,
+          status: newStatus,
+          customerPhone: order.customer_phone,
+          customerName: order.customer_name,
+          orderType: order.order_type,
+          total: order.total,
+        },
+      });
+
+      if (error) {
+        console.error('Erro ao enviar notificação:', error);
+      } else {
+        toast.success(`Notificação enviada para ${order.customer_phone}`, {
+          icon: <MessageCircle className="h-4 w-4" />,
+        });
+      }
+    } catch (error) {
+      console.error('Erro ao notificar cliente:', error);
+    }
+  };
 
   const handleStatusChange = async (newStatus: OrderStatus) => {
     try {
@@ -40,7 +75,13 @@ export function OrderCardKDS({ order }: OrderCardKDSProps) {
         .eq('id', order.id);
 
       if (error) throw error;
+      
       toast.success(`Pedido #${order.order_number} atualizado`);
+
+      // Envia notificação WhatsApp se aplicável
+      if (notifiableStatuses.includes(newStatus)) {
+        await notifyCustomer(newStatus);
+      }
     } catch (error) {
       console.error('Erro ao atualizar status:', error);
       toast.error('Erro ao atualizar pedido');
