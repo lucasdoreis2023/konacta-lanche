@@ -10,12 +10,31 @@ interface Position {
 export function WhatsAppFloatingButton() {
   const [position, setPosition] = useState<Position>({ x: 24, y: 24 });
   const [isDragging, setIsDragging] = useState(false);
+  const [hasMoved, setHasMoved] = useState(false);
   const [dragOffset, setDragOffset] = useState<Position>({ x: 0, y: 0 });
-  const buttonRef = useRef<HTMLAnchorElement>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const startPosRef = useRef<Position>({ x: 0, y: 0 });
 
   const whatsappNumber = '5511999999999'; // Número da lanchonete
   const whatsappMessage = encodeURIComponent('Olá! Gostaria de fazer um pedido.');
-  const whatsappUrl = `https://wa.me/${whatsappNumber}?text=${whatsappMessage}`;
+
+  const openWhatsApp = () => {
+    if (hasMoved) {
+      setHasMoved(false);
+      return;
+    }
+    
+    // Detecta se é mobile
+    const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+    
+    if (isMobile) {
+      // Link direto para o app do WhatsApp no mobile
+      window.location.href = `whatsapp://send?phone=${whatsappNumber}&text=${whatsappMessage}`;
+    } else {
+      // Web WhatsApp para desktop
+      window.open(`https://web.whatsapp.com/send?phone=${whatsappNumber}&text=${whatsappMessage}`, '_blank');
+    }
+  };
 
   const handleMouseDown = (e: React.MouseEvent) => {
     if (!buttonRef.current) return;
@@ -26,7 +45,9 @@ export function WhatsAppFloatingButton() {
       x: e.clientX - rect.left,
       y: e.clientY - rect.top,
     });
+    startPosRef.current = { x: e.clientX, y: e.clientY };
     setIsDragging(true);
+    setHasMoved(false);
   };
 
   const handleTouchStart = (e: React.TouchEvent) => {
@@ -38,12 +59,21 @@ export function WhatsAppFloatingButton() {
       x: touch.clientX - rect.left,
       y: touch.clientY - rect.top,
     });
+    startPosRef.current = { x: touch.clientX, y: touch.clientY };
     setIsDragging(true);
+    setHasMoved(false);
   };
 
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
       if (!isDragging) return;
+      
+      // Check if actually moved
+      const dx = Math.abs(e.clientX - startPosRef.current.x);
+      const dy = Math.abs(e.clientY - startPosRef.current.y);
+      if (dx > 5 || dy > 5) {
+        setHasMoved(true);
+      }
       
       const newX = window.innerWidth - e.clientX - (60 - dragOffset.x);
       const newY = window.innerHeight - e.clientY - (60 - dragOffset.y);
@@ -58,6 +88,14 @@ export function WhatsAppFloatingButton() {
       if (!isDragging) return;
       
       const touch = e.touches[0];
+      
+      // Check if actually moved
+      const dx = Math.abs(touch.clientX - startPosRef.current.x);
+      const dy = Math.abs(touch.clientY - startPosRef.current.y);
+      if (dx > 5 || dy > 5) {
+        setHasMoved(true);
+      }
+      
       const newX = window.innerWidth - touch.clientX - (60 - dragOffset.x);
       const newY = window.innerHeight - touch.clientY - (60 - dragOffset.y);
       
@@ -86,20 +124,10 @@ export function WhatsAppFloatingButton() {
     };
   }, [isDragging, dragOffset]);
 
-  const handleClick = (e: React.MouseEvent) => {
-    // Prevenir clique se estava arrastando
-    if (isDragging) {
-      e.preventDefault();
-    }
-  };
-
   return (
-    <a
+    <button
       ref={buttonRef}
-      href={whatsappUrl}
-      target="_blank"
-      rel="noopener noreferrer"
-      onClick={handleClick}
+      onClick={openWhatsApp}
       onMouseDown={handleMouseDown}
       onTouchStart={handleTouchStart}
       className={cn(
@@ -119,6 +147,6 @@ export function WhatsAppFloatingButton() {
       
       {/* Pulse animation */}
       <span className="absolute inset-0 rounded-full bg-[#25D366] animate-ping opacity-30" />
-    </a>
+    </button>
   );
 }
