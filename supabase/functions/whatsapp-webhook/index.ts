@@ -72,6 +72,10 @@ interface ConversationContext {
     items: Array<{ name: string; quantity: number }>;
     transcript: string;
   };
+  // Histórico de conversa para contexto da IA
+  conversationHistory?: Array<{ role: "user" | "assistant"; content: string; inputType?: "text" | "audio" }>;
+  // Troco necessário (se pagamento em dinheiro)
+  changeFor?: number;
 }
 
 interface Category {
@@ -672,6 +676,348 @@ Responda APENAS com JSON:
     console.error("Erro ao interpretar pedido (fallback):", error);
     return { items: [], understood: false };
   }
+}
+
+// ============ ATENDENTE IA COM DEEPSEEK ============
+
+// Prompt de sistema do atendente virtual
+function getAttendantSystemPrompt(products: Product[], context: ConversationContext, inputType: "text" | "audio"): string {
+  const productList = products.map(p => `- ${p.name}: R$ ${p.price.toFixed(2)}${p.description ? ` (${p.description})` : ""}`).join("\n");
+  
+  const cartSummary = context.cart.length > 0
+    ? context.cart.map(item => `${item.quantity}x ${item.productName} - R$ ${(item.price * item.quantity).toFixed(2)}`).join("\n")
+    : "Vazio";
+  
+  const cartTotal = context.cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
+  const deliveryFee = context.orderType === "DELIVERY" ? 5 : 0;
+
+  return `Você é um atendente virtual simpático de uma lanchonete. Tom humano, direto e amigável.
+
+REGRAS DE COMUNICAÇÃO (MUITO IMPORTANTE):
+- O cliente enviou a mensagem via ${inputType.toUpperCase()}.
+- Se input_type = text → responda em TEXTO curto e objetivo.
+- Se input_type = audio → responda com texto natural para ser narrado (será convertido em áudio).
+- Seja curto, simpático e objetivo. Faça UMA pergunta por vez.
+- NUNCA invente produtos, preços ou promoções. Use APENAS o cardápio abaixo.
+
+CARDÁPIO DISPONÍVEL:
+${productList}
+
+ESTADO ATUAL DO PEDIDO:
+- Carrinho: ${cartSummary}
+- Total do carrinho: R$ ${cartTotal.toFixed(2)}
+- Nome do cliente: ${context.customerName || "Não informado"}
+- Tipo: ${context.orderType === "DELIVERY" ? "Entrega (+R$ 5,00)" : context.orderType === "PRESENCIAL" ? "Retirada" : "Não definido"}
+- Endereço: ${context.deliveryAddress || "Não informado"}
+- Pagamento: ${context.paymentMethod || "Não definido"}
+${context.changeFor ? `- Troco para: R$ ${context.changeFor.toFixed(2)}` : ""}
+
+FORMAS DE PAGAMENTO ACEITAS: PIX, Cartão, Dinheiro
+
+FLUXO DE ATENDIMENTO:
+1. Se cliente quer pedir: identifique os itens do cardápio e quantidades
+2. Confirme os itens antes de adicionar ao carrinho
+3. Pergunte se quer mais alguma coisa
+4. Quando finalizar: pergunte entrega ou retirada
+5. Se entrega: peça endereço completo
+6. Pergunte forma de pagamento
+7. Se dinheiro: pergunte se precisa de troco e para quanto
+8. Mostre resumo e peça confirmação final
+
+SE O CLIENTE PEDIR ALGO QUE NÃO EXISTE:
+- Peça desculpas de forma leve
+- Ofereça 2-3 alternativas do cardápio
+
+RESPONDA COM JSON NO FORMATO:
+{
+  "text_reply": "Resposta em texto para o cliente",
+  "voice_reply_script": "Texto natural para ser narrado (se input for áudio)",
+  "action": "none|add_to_cart|remove_from_cart|set_delivery|set_pickup|set_address|set_payment|set_change|confirm_order|check_status",
+  "action_data": {
+    "items": [{"name": "Nome do Produto", "quantity": 1}],
+    "address": "endereço se informado",
+    "payment": "PIX|CARTAO|DINHEIRO",
+    "change_for": 50,
+    "order_number": 123
+  }
+}`;
+}
+
+// Processa mensagem com IA (DeepSeek)
+async function processWithAI(
+  supabase: ReturnType<typeof getSupabase>,
+  phone: string,
+  message: string,
+  inputType: "text" | "audio",
+  context: ConversationContext
+): Promise<{
+  textReply: string;
+  voiceReply?: string;
+  newContext: ConversationContext;
+  shouldSendVoice: boolean;
+}> {
+  const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY");
+  const products = await getAllProducts(supabase);
+  
+  let newContext = { ...context };
+  
+  // Inicializa histórico se não existir
+  if (!newContext.conversationHistory) {
+    newContext.conversationHistory = [];
+  }
+  
+  // Adiciona mensagem do usuário ao histórico
+  newContext.conversationHistory.push({
+    role: "user",
+    content: message,
+    inputType
+  });
+  
+  // Limita histórico a últimas 10 mensagens
+  if (newContext.conversationHistory.length > 20) {
+    newContext.conversationHistory = newContext.conversationHistory.slice(-20);
+  }
+  
+  const systemPrompt = getAttendantSystemPrompt(products, newContext, inputType);
+  
+  // Monta mensagens para a IA
+  const aiMessages = [
+    { role: "system", content: systemPrompt },
+    ...newContext.conversationHistory.map(msg => ({
+      role: msg.role,
+      content: msg.content
+    }))
+  ];
+  
+  // Usa OpenRouter/DeepSeek se disponível, senão Lovable AI
+  const apiUrl = OPENROUTER_API_KEY 
+    ? "https://openrouter.ai/api/v1/chat/completions"
+    : "https://ai.gateway.lovable.dev/v1/chat/completions";
+  
+  const apiKey = OPENROUTER_API_KEY || Deno.env.get("LOVABLE_API_KEY");
+  const model = OPENROUTER_API_KEY ? "deepseek/deepseek-chat" : "google/gemini-3-flash-preview";
+  
+  if (!apiKey) {
+    console.error("Nenhuma API key configurada para IA");
+    return {
+      textReply: "Desculpe, estou com um probleminha técnico. Pode tentar de novo?",
+      newContext,
+      shouldSendVoice: inputType === "audio"
+    };
+  }
+
+  try {
+    console.log(`[AI] Processando com ${OPENROUTER_API_KEY ? "DeepSeek" : "Lovable AI"}: "${message}" (${inputType})`);
+    
+    const headers: Record<string, string> = {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    };
+    
+    if (OPENROUTER_API_KEY) {
+      headers["HTTP-Referer"] = "https://lovable.dev";
+      headers["X-Title"] = "WhatsApp Lanchonete Bot";
+    }
+    
+    const response = await fetch(apiUrl, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model,
+        messages: aiMessages,
+        temperature: 0.4,
+        max_tokens: 800
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error("Erro AI:", response.status, errorText);
+      throw new Error(`AI API error: ${response.status}`);
+    }
+
+    const result = await response.json();
+    const content = result.choices?.[0]?.message?.content || "";
+    
+    console.log(`[AI] Resposta: ${content.slice(0, 200)}...`);
+    
+    // Tenta extrair JSON da resposta
+    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    
+    if (jsonMatch) {
+      try {
+        const parsed = JSON.parse(jsonMatch[0]);
+        
+        const textReply = parsed.text_reply || "Como posso ajudar?";
+        const voiceReply = parsed.voice_reply_script || textReply;
+        
+        // Processa ações
+        if (parsed.action && parsed.action !== "none") {
+          newContext = await processAIAction(
+            supabase, 
+            phone, 
+            parsed.action, 
+            parsed.action_data || {}, 
+            newContext,
+            products
+          );
+        }
+        
+        // Adiciona resposta ao histórico
+        newContext.conversationHistory?.push({
+          role: "assistant",
+          content: textReply,
+          inputType
+        });
+        
+        return {
+          textReply,
+          voiceReply: inputType === "audio" ? voiceReply : undefined,
+          newContext,
+          shouldSendVoice: inputType === "audio"
+        };
+      } catch (parseError) {
+        console.error("Erro ao parsear JSON da IA:", parseError);
+      }
+    }
+    
+    // Se não conseguiu parsear JSON, usa a resposta como texto
+    const fallbackReply = content.replace(/```json[\s\S]*?```/g, "").trim() || "Como posso ajudar?";
+    
+    newContext.conversationHistory?.push({
+      role: "assistant",
+      content: fallbackReply,
+      inputType
+    });
+    
+    return {
+      textReply: fallbackReply,
+      voiceReply: inputType === "audio" ? fallbackReply : undefined,
+      newContext,
+      shouldSendVoice: inputType === "audio"
+    };
+    
+  } catch (error) {
+    console.error("Erro ao processar com IA:", error);
+    return {
+      textReply: "Desculpe, tive um probleminha. Pode repetir?",
+      newContext,
+      shouldSendVoice: inputType === "audio"
+    };
+  }
+}
+
+// Processa ações retornadas pela IA
+async function processAIAction(
+  supabase: ReturnType<typeof getSupabase>,
+  phone: string,
+  action: string,
+  actionData: any,
+  context: ConversationContext,
+  products: Product[]
+): Promise<ConversationContext> {
+  let newContext = { ...context };
+  
+  console.log(`[AI Action] ${action}:`, JSON.stringify(actionData));
+  
+  switch (action) {
+    case "add_to_cart":
+      if (actionData.items && Array.isArray(actionData.items)) {
+        for (const item of actionData.items) {
+          const product = products.find(p => 
+            p.name.toLowerCase().includes(item.name.toLowerCase()) ||
+            item.name.toLowerCase().includes(p.name.toLowerCase())
+          );
+          
+          if (product) {
+            const existingItem = newContext.cart.find(c => c.productId === product.id);
+            if (existingItem) {
+              existingItem.quantity += item.quantity || 1;
+            } else {
+              newContext.cart.push({
+                productId: product.id,
+                productName: product.name,
+                quantity: item.quantity || 1,
+                price: product.price
+              });
+            }
+            console.log(`[AI Action] Adicionado: ${item.quantity || 1}x ${product.name}`);
+          }
+        }
+      }
+      break;
+      
+    case "remove_from_cart":
+      if (actionData.items && Array.isArray(actionData.items)) {
+        for (const item of actionData.items) {
+          const idx = newContext.cart.findIndex(c => 
+            c.productName.toLowerCase().includes(item.name.toLowerCase())
+          );
+          if (idx >= 0) {
+            newContext.cart.splice(idx, 1);
+            console.log(`[AI Action] Removido: ${item.name}`);
+          }
+        }
+      }
+      break;
+      
+    case "set_delivery":
+      newContext.orderType = "DELIVERY";
+      break;
+      
+    case "set_pickup":
+      newContext.orderType = "PRESENCIAL";
+      break;
+      
+    case "set_address":
+      if (actionData.address) {
+        newContext.deliveryAddress = actionData.address;
+      }
+      break;
+      
+    case "set_name":
+      if (actionData.name) {
+        newContext.customerName = actionData.name;
+      }
+      break;
+      
+    case "set_payment":
+      if (actionData.payment) {
+        const paymentMap: Record<string, "PIX" | "CARTAO" | "DINHEIRO"> = {
+          "pix": "PIX",
+          "cartao": "CARTAO",
+          "cartão": "CARTAO",
+          "dinheiro": "DINHEIRO",
+        };
+        newContext.paymentMethod = paymentMap[actionData.payment.toLowerCase()] || actionData.payment;
+      }
+      break;
+      
+    case "set_change":
+      if (actionData.change_for) {
+        newContext.changeFor = actionData.change_for;
+      }
+      break;
+      
+    case "confirm_order":
+      // Cria o pedido no banco
+      const orderNumber = await createOrder(supabase, newContext, phone);
+      if (orderNumber) {
+        console.log(`[AI Action] Pedido criado: #${orderNumber}`);
+        // Limpa contexto após pedido confirmado
+        newContext = { 
+          cart: [],
+          conversationHistory: newContext.conversationHistory 
+        };
+      }
+      break;
+      
+    case "check_status":
+      // Status será buscado e retornado pela IA
+      break;
+  }
+  
+  return newContext;
 }
 
 // Formata preço
@@ -2187,13 +2533,64 @@ Deno.serve(async (req) => {
     const supabase = getSupabase();
     const { state, context } = await getOrCreateSession(supabase, phone);
 
+    // Flag para usar modo IA inteligente
+    const USE_AI_MODE = true;
+    const inputType = isAudioMessage ? "audio" : "text";
+    
+    let textMessage = message;
+    
+    // Se é áudio, primeiro transcreve
+    if (isAudioMessage) {
+      await sendWhatsAppMessage(phone, "🎤 Recebi seu áudio! Processando...", false);
+      await sendRecordingStatus(phone);
+      
+      const audioBuffer = await downloadWhatsAppMedia(messageId);
+      if (!audioBuffer) {
+        await sendWhatsAppMessage(phone, "😕 Não consegui baixar o áudio. Pode tentar de novo?", true);
+        return new Response(JSON.stringify({ status: "audio_error" }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+      
+      const transcript = await transcribeAudio(audioBuffer);
+      if (!transcript || transcript.trim().length < 3) {
+        await sendWhatsAppMessage(phone, "😕 Não consegui entender. Pode falar mais devagar ou digitar?", true);
+        return new Response(JSON.stringify({ status: "transcription_error" }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+      
+      textMessage = transcript;
+      console.log(`Transcrição: ${transcript}`);
+    }
+
+    if (USE_AI_MODE) {
+      // MODO IA INTELIGENTE - Usa DeepSeek para respostas naturais
+      const aiResult = await processWithAI(supabase, phone, textMessage, inputType, context);
+      
+      // Atualiza sessão com novo contexto
+      await updateSession(supabase, phone, "WELCOME", aiResult.newContext);
+      
+      // Envia resposta de texto
+      await sendWhatsAppMessage(phone, aiResult.textReply, true);
+      
+      // Se input foi áudio, responde também com áudio
+      if (aiResult.shouldSendVoice && aiResult.voiceReply) {
+        await delay(500);
+        await sendVoiceResponse(phone, aiResult.voiceReply);
+      }
+      
+      return new Response(JSON.stringify({ status: "ok", mode: "ai" }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    // MODO LEGADO - Máquina de estados tradicional
     let result: ProcessResult & { sendVoiceReply?: boolean; voiceText?: string };
 
     if (isAudioMessage) {
-      // Processa áudio
       result = await processAudioMessage(supabase, phone, messageId, context, state);
     } else {
-      // Processa texto
       result = await processMessage(supabase, phone, message, state, context);
     }
 
@@ -2208,7 +2605,6 @@ Deno.serve(async (req) => {
     }
     
     // RESPONDE COM ÁUDIO APENAS SE O CLIENTE ENVIOU ÁUDIO
-    // Isso facilita para pessoas que não conseguem ler ou escrever
     if (isAudioMessage && result.sendVoiceReply && result.voiceText) {
       await delay(500);
       await sendVoiceResponse(phone, result.voiceText);
