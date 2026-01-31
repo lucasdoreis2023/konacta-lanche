@@ -10,14 +10,23 @@ import {
   ClipboardList,
   ChefHat,
   LogOut,
+  Users,
+  BarChart3,
+  Settings,
+  Menu,
+  X,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { useState } from 'react';
 
 const navItems = [
   { path: '/admin', label: 'Dashboard', icon: LayoutDashboard },
   { path: '/admin/categories', label: 'Categorias', icon: FolderTree },
   { path: '/admin/products', label: 'Produtos', icon: Package },
   { path: '/admin/orders', label: 'Pedidos', icon: ClipboardList },
+  { path: '/admin/reports', label: 'Relatórios', icon: BarChart3 },
+  { path: '/admin/users', label: 'Usuários', icon: Users },
+  { path: '/admin/settings', label: 'Configurações', icon: Settings },
   { path: '/kds', label: 'KDS', icon: ChefHat },
 ];
 
@@ -28,6 +37,7 @@ interface AdminLayoutProps {
 export function AdminLayout({ children }: AdminLayoutProps) {
   const location = useLocation();
   const navigate = useNavigate();
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   const handleLogout = async () => {
     await supabase.auth.signOut();
@@ -36,14 +46,39 @@ export function AdminLayout({ children }: AdminLayoutProps) {
   };
 
   return (
-    <div className="flex min-h-screen">
+    <div className="flex min-h-screen bg-muted/30">
+      {/* Mobile overlay */}
+      {sidebarOpen && (
+        <div 
+          className="fixed inset-0 z-40 bg-black/50 lg:hidden"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
+
       {/* Sidebar */}
-      <aside className="fixed left-0 top-0 z-40 h-screen w-64 border-r bg-background">
-        <div className="flex h-16 items-center gap-2 border-b px-4">
-          <UtensilsCrossed className="h-6 w-6 text-primary" />
-          <span className="font-bold">Admin</span>
+      <aside 
+        className={cn(
+          "fixed left-0 top-0 z-50 h-screen w-64 border-r bg-background transition-transform duration-300 lg:translate-x-0",
+          sidebarOpen ? "translate-x-0" : "-translate-x-full"
+        )}
+      >
+        <div className="flex h-16 items-center justify-between border-b px-4">
+          <div className="flex items-center gap-2">
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary">
+              <UtensilsCrossed className="h-4 w-4 text-primary-foreground" />
+            </div>
+            <span className="font-bold">Admin</span>
+          </div>
+          <Button 
+            variant="ghost" 
+            size="icon" 
+            className="lg:hidden"
+            onClick={() => setSidebarOpen(false)}
+          >
+            <X className="h-5 w-5" />
+          </Button>
         </div>
-        <nav className="space-y-1 p-4">
+        <nav className="flex flex-col gap-1 p-3">
           {navItems.map(item => {
             const Icon = item.icon;
             const isActive = location.pathname === item.path;
@@ -51,10 +86,11 @@ export function AdminLayout({ children }: AdminLayoutProps) {
               <Link
                 key={item.path}
                 to={item.path}
+                onClick={() => setSidebarOpen(false)}
                 className={cn(
-                  'flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors',
+                  'flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-all',
                   isActive
-                    ? 'bg-primary text-primary-foreground'
+                    ? 'bg-primary text-primary-foreground shadow-sm'
                     : 'text-muted-foreground hover:bg-muted hover:text-foreground'
                 )}
               >
@@ -64,7 +100,7 @@ export function AdminLayout({ children }: AdminLayoutProps) {
             );
           })}
         </nav>
-        <div className="absolute bottom-4 left-4 right-4">
+        <div className="absolute bottom-4 left-3 right-3">
           <Button
             variant="outline"
             className="w-full justify-start gap-2"
@@ -77,7 +113,25 @@ export function AdminLayout({ children }: AdminLayoutProps) {
       </aside>
 
       {/* Main content */}
-      <main className="ml-64 flex-1 p-6">{children}</main>
+      <div className="flex flex-1 flex-col lg:ml-64">
+        {/* Mobile header */}
+        <header className="sticky top-0 z-30 flex h-14 items-center gap-4 border-b bg-background px-4 lg:hidden">
+          <Button 
+            variant="ghost" 
+            size="icon"
+            onClick={() => setSidebarOpen(true)}
+          >
+            <Menu className="h-5 w-5" />
+          </Button>
+          <div className="flex items-center gap-2">
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary">
+              <UtensilsCrossed className="h-4 w-4 text-primary-foreground" />
+            </div>
+            <span className="font-bold">Admin</span>
+          </div>
+        </header>
+        <main className="flex-1 p-4 lg:p-6">{children}</main>
+      </div>
     </div>
   );
 }
