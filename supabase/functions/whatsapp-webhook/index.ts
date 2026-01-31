@@ -1585,8 +1585,7 @@ async function processAudioMessage(
   const greeting = getTimeGreeting();
   let newContext = { ...context };
 
-  // Notifica que está processando
-  await sendWhatsAppMessage(phone, "🎤 Recebi seu áudio! Processando...", false);
+  // Mostra status de "gravando" para indicar processamento (sem mensagem de texto)
   await sendRecordingStatus(phone);
 
   // Baixa o áudio
@@ -2846,9 +2845,9 @@ Deno.serve(async (req) => {
     
     let textMessage = message;
     
-    // Se é áudio, primeiro transcreve
+    // Se é áudio, primeiro transcreve (sem enviar mensagem de texto)
     if (isAudioMessage) {
-      await sendWhatsAppMessage(phone, "🎤 Recebi seu áudio! Processando...", false);
+      // Apenas mostra status de "gravando" para indicar que está processando
       await sendRecordingStatus(phone);
       
       const audioBuffer = await downloadWhatsAppMedia(messageId);
