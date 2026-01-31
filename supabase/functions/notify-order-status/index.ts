@@ -236,21 +236,20 @@ function getStatusMessage(
   orderNumber: number, 
   status: string, 
   customerName: string | null,
-  orderType: string,
-  total: number
+  orderType: string
 ): string {
   const safeName = sanitizeCustomerName(customerName);
   const greeting = safeName ? `Olá, ${safeName}! ` : "Olá! ";
   
   switch (status) {
     case "EM_PREPARO":
-      return `${greeting}👨‍🍳\n\n*Seu pedido #${orderNumber} está sendo preparado!*\n\nNossa equipe já começou a preparar seu pedido com muito carinho.\n\nVocê receberá uma mensagem quando estiver pronto!\n\n💰 Total: ${formatPrice(total)}`;
+      return `${greeting}👨‍🍳\n\n*Seu pedido #${orderNumber} está sendo preparado!*\n\nNossa equipe já começou a preparar seu pedido com muito carinho.\n\nVocê receberá uma mensagem quando estiver pronto!`;
     
     case "PRONTO":
       if (orderType === "DELIVERY") {
-        return `${greeting}🛵\n\n*Seu pedido #${orderNumber} saiu para entrega!*\n\nPrepare-se! Seu pedido está a caminho.\n\nAgradecemos a preferência! 💛\n\n💰 Total: ${formatPrice(total)}`;
+        return `${greeting}🛵\n\n*Seu pedido #${orderNumber} saiu para entrega!*\n\nPrepare-se! Seu pedido está a caminho.\n\nAgradecemos a preferência! 💛`;
       }
-      return `${greeting}✅\n\n*Seu pedido #${orderNumber} está PRONTO!*\n\nVocê já pode retirar seu pedido no balcão.\n\nAgradecemos a preferência! 💛\n\n💰 Total: ${formatPrice(total)}`;
+      return `${greeting}✅\n\n*Seu pedido #${orderNumber} está PRONTO!*\n\nVocê já pode retirar seu pedido no balcão.\n\nAgradecemos a preferência! 💛`;
     
     case "ENTREGUE":
       return `${greeting}🎉\n\n*Pedido #${orderNumber} entregue com sucesso!*\n\nEsperamos que aproveite!\n\nDeixe sua avaliação e volte sempre! 💛\n\nDigite *CARDÁPIO* para fazer um novo pedido.`;
@@ -259,7 +258,7 @@ function getStatusMessage(
       return `${greeting}❌\n\n*Pedido #${orderNumber} foi cancelado.*\n\nSe tiver dúvidas, entre em contato conosco.\n\nDigite *CARDÁPIO* para fazer um novo pedido.`;
     
     default:
-      return `${greeting}📦\n\n*Atualização do pedido #${orderNumber}*\n\nStatus: ${status}\n\n💰 Total: ${formatPrice(total)}`;
+      return `${greeting}📦\n\n*Atualização do pedido #${orderNumber}*\n\nStatus: ${status}`;
   }
 }
 
@@ -268,16 +267,14 @@ function getStatusVoiceScript(
   orderNumber: number, 
   status: string, 
   customerName: string | null,
-  orderType: string,
-  total: number
+  orderType: string
 ): string {
   const safeName = sanitizeCustomerName(customerName);
   const greeting = safeName ? `Olá, ${safeName}!` : "Olá!";
-  const totalFormatted = formatPrice(total).replace("R$", "reais");
   
   switch (status) {
     case "EM_PREPARO":
-      return `${greeting} Seu pedido número ${orderNumber} está sendo preparado! Nossa equipe já começou a preparar com muito carinho. Você receberá uma mensagem quando estiver pronto. O total é ${totalFormatted}.`;
+      return `${greeting} Seu pedido número ${orderNumber} está sendo preparado! Nossa equipe já começou a preparar com muito carinho. Você receberá uma mensagem quando estiver pronto.`;
     
     case "PRONTO":
       if (orderType === "DELIVERY") {
@@ -337,7 +334,7 @@ Deno.serve(async (req) => {
     if (inputType === "audio") {
       console.log(`Enviando notificação por ÁUDIO para ${customerPhone}`);
       
-      const voiceScript = getStatusVoiceScript(orderNumber, status, customerName, orderType, total);
+      const voiceScript = getStatusVoiceScript(orderNumber, status, customerName, orderType);
       const audioBuffer = await generateTTSAudio(voiceScript);
       
       if (audioBuffer) {
@@ -347,13 +344,13 @@ Deno.serve(async (req) => {
       // Fallback: se falhar o áudio, envia texto
       if (!success) {
         console.log("Fallback para texto após falha no áudio");
-        const message = getStatusMessage(orderNumber, status, customerName, orderType, total);
+        const message = getStatusMessage(orderNumber, status, customerName, orderType);
         success = await sendWhatsAppMessage(customerPhone, message);
       }
     } else {
       // Pedido feito por texto: envia notificação por texto
       console.log(`Enviando notificação por TEXTO para ${customerPhone}`);
-      const message = getStatusMessage(orderNumber, status, customerName, orderType, total);
+      const message = getStatusMessage(orderNumber, status, customerName, orderType);
       success = await sendWhatsAppMessage(customerPhone, message);
     }
 
