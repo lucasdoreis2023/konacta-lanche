@@ -876,20 +876,23 @@ Responda APENAS com JSON:
 function getAttendantSystemPrompt(products: Product[], context: ConversationContext, inputType: "text" | "audio"): string {
   const productList = products.map(p => `- ${p.name}: R$ ${p.price.toFixed(2)}${p.description ? ` (${p.description})` : ""}`).join("\n");
   
-  const cartSummary = context.cart.length > 0
-    ? context.cart.map(item => `${item.quantity}x ${item.productName} - R$ ${(item.price * item.quantity).toFixed(2)}`).join("\n")
+  // Garante que cart seja sempre um array válido
+  const cart = Array.isArray(context?.cart) ? context.cart : [];
+  
+  const cartSummary = cart.length > 0
+    ? cart.map(item => `${item.quantity}x ${item.productName} - R$ ${(item.price * item.quantity).toFixed(2)}`).join("\n")
     : "Vazio";
   
-  const cartTotal = context.cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
-  const deliveryFee = context.orderType === "DELIVERY" ? 5 : 0;
+  const cartTotal = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
+  const deliveryFee = context?.orderType === "DELIVERY" ? 5 : 0;
 
   // Determina qual dado está faltando para guiar a conversa
   const missingData: string[] = [];
-  if (context.cart.length === 0) missingData.push("ITENS DO PEDIDO");
-  if (!isValidCustomerName(context.customerName)) missingData.push("NOME");
-  if (!context.orderType) missingData.push("TIPO (entrega ou retirada)");
-  if (context.orderType === "DELIVERY" && !context.deliveryAddress) missingData.push("ENDEREÇO");
-  if (!context.paymentMethod) missingData.push("PAGAMENTO");
+  if (cart.length === 0) missingData.push("ITENS DO PEDIDO");
+  if (!isValidCustomerName(context?.customerName)) missingData.push("NOME");
+  if (!context?.orderType) missingData.push("TIPO (entrega ou retirada)");
+  if (context?.orderType === "DELIVERY" && !context?.deliveryAddress) missingData.push("ENDEREÇO");
+  if (!context?.paymentMethod) missingData.push("PAGAMENTO");
   
   const missingDataInfo = missingData.length > 0 
     ? `DADOS QUE AINDA FALTAM: ${missingData.join(", ")}`
@@ -1508,6 +1511,10 @@ async function processAIAction(
   inputType: "text" | "audio" = "text"
 ): Promise<AIActionResult> {
   let newContext = { ...context };
+  // Garante que cart seja sempre um array válido
+  if (!Array.isArray(newContext.cart)) {
+    newContext.cart = [];
+  }
   let orderNumber: number | undefined;
   let confirmOrderBlocked: ConfirmOrderBlockReason | undefined;
   let sentToReview = false;
