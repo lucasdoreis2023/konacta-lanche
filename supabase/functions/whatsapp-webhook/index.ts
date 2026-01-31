@@ -399,9 +399,6 @@ async function sendWhatsAppAudio(phone: string, audioBuffer: ArrayBuffer): Promi
     }
     const base64Audio = btoa(binary);
 
-    // Formato correto para Evolution API: data:audio/mpeg;base64,...
-    const audioDataUri = `data:audio/mpeg;base64,${base64Audio}`;
-
     console.log(`Enviando áudio TTS para ${phone}, tamanho: ${bytes.length} bytes`);
 
     const response = await fetch(url, {
@@ -412,8 +409,8 @@ async function sendWhatsAppAudio(phone: string, audioBuffer: ArrayBuffer): Promi
       },
       body: JSON.stringify({
         number: phone,
-        audio: audioDataUri,
-        encoding: true,
+        // Evolution API espera URL ou BASE64 puro (sem data URI)
+        audio: base64Audio,
       }),
     });
 
@@ -431,7 +428,7 @@ async function sendWhatsAppAudio(phone: string, audioBuffer: ArrayBuffer): Promi
         },
         body: JSON.stringify({
           number: phone,
-          audio: audioDataUri,
+          audio: base64Audio,
         }),
       });
       
@@ -1082,6 +1079,29 @@ async function processAudioMessage(
       newContext,
       sendVoiceReply: true,
       voiceText: "Não entendi. Diga sim para confirmar ou não para cancelar."
+    };
+  }
+
+  // CHECKOUT via áudio: trate a transcrição como se fosse texto digitado.
+  // Sem isso, nomes/endereços/pagamento caem no fallback de interpretação de pedido e voltam para o início.
+  if (
+    currentState === "CHECKOUT_NAME" ||
+    currentState === "CHECKOUT_TYPE" ||
+    currentState === "CHECKOUT_ADDRESS" ||
+    currentState === "CHECKOUT_PAYMENT"
+  ) {
+    const msgResult = await processMessage(supabase, phone, transcript, currentState, newContext);
+
+    const voiceText = msgResult.messages
+      .map((m) => m.replace(/\*([^*]+)\*/g, "$1").replace(/\n+/g, " ").trim())
+      .join(" ")
+      .trim()
+      .slice(0, 900);
+
+    return {
+      ...msgResult,
+      sendVoiceReply: true,
+      voiceText: voiceText || "Pode repetir, por favor?",
     };
   }
   
@@ -1974,7 +1994,7 @@ async function processMessage(
         };
       }
 
-      if (msgLower === "2" || msgLower.includes("delivery")) {
+      if (msgLower === "2" || msgLower.includes("delivery") || msgLower.includes("entrega")) {
         newContext.orderType = "DELIVERY";
         return {
           newState: "CHECKOUT_ADDRESS",
