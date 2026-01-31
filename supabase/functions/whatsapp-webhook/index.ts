@@ -381,17 +381,19 @@ async function sendWhatsAppAudio(phone: string, audioBuffer: ArrayBuffer): Promi
   const url = `${evolutionUrl}/message/sendWhatsAppAudio/${instanceName}`;
 
   try {
-    // Converte ArrayBuffer para base64 em chunks
+    // Converte ArrayBuffer para base64 usando método seguro
     const bytes = new Uint8Array(audioBuffer);
-    const chunkSize = 8192;
     let binary = "";
-    for (let i = 0; i < bytes.length; i += chunkSize) {
-      const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
-      for (let j = 0; j < chunk.length; j++) {
-        binary += String.fromCharCode(chunk[j]);
-      }
+    const len = bytes.byteLength;
+    for (let i = 0; i < len; i++) {
+      binary += String.fromCharCode(bytes[i]);
     }
     const base64Audio = btoa(binary);
+
+    // Formato correto para Evolution API: data:audio/mpeg;base64,...
+    const audioDataUri = `data:audio/mpeg;base64,${base64Audio}`;
+
+    console.log(`Enviando áudio TTS para ${phone}, tamanho: ${bytes.length} bytes`);
 
     const response = await fetch(url, {
       method: "POST",
@@ -401,15 +403,39 @@ async function sendWhatsAppAudio(phone: string, audioBuffer: ArrayBuffer): Promi
       },
       body: JSON.stringify({
         number: phone,
-        audio: `data:audio/mp3;base64,${base64Audio}`,
+        audio: audioDataUri,
+        encoding: true,
       }),
     });
 
     if (!response.ok) {
-      console.error("Erro ao enviar áudio:", response.status, await response.text());
-      return false;
+      const errorText = await response.text();
+      console.error("Erro ao enviar áudio:", response.status, errorText);
+      
+      // Fallback: tenta endpoint alternativo
+      const altUrl = `${evolutionUrl}/message/sendPtv/${instanceName}`;
+      const altResponse = await fetch(altUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          apikey: evolutionKey,
+        },
+        body: JSON.stringify({
+          number: phone,
+          audio: audioDataUri,
+        }),
+      });
+      
+      if (!altResponse.ok) {
+        console.error("Fallback também falhou:", altResponse.status, await altResponse.text());
+        return false;
+      }
+      
+      console.log("Áudio enviado via endpoint alternativo");
+      return true;
     }
 
+    console.log("Áudio TTS enviado com sucesso");
     return true;
   } catch (error) {
     console.error("Erro ao enviar áudio WhatsApp:", error);
@@ -910,7 +936,25 @@ async function processAudioMessage(
     }
   }
   
-  // Trata intenções globais
+  // INTENÇÃO GLOBAL: Finalizar pedido (funciona de qualquer estado se tiver carrinho)
+  if (intent === "finish" && newContext.cart.length > 0) {
+    const cartList = newContext.cart
+      .map(item => `• ${item.quantity}x ${item.productName} - ${formatPrice(item.price * item.quantity)}`)
+      .join("\n");
+    const total = newContext.cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
+    
+    return {
+      newState: "CHECKOUT_NAME",
+      messages: [
+        `📝 Ouvi: "${transcript}"`,
+        `🛒 *Seu pedido:*\n\n${cartList}\n\n💰 *Total: ${formatPrice(total)}*`,
+        "Perfeito! Vamos finalizar. Me diz seu *nome*:"
+      ],
+      newContext,
+      sendVoiceReply: true,
+      voiceText: `Anotado! Seu total é ${formatPrice(total)}. Me diz seu nome para finalizar.`
+    };
+  }
   
   // INTENÇÃO: Cardápio/Menu
   if (intent === "menu") {
