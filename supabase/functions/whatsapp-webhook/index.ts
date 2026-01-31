@@ -2571,16 +2571,23 @@ Deno.serve(async (req) => {
       // Atualiza sessão com novo contexto
       await updateSession(supabase, phone, "WELCOME", aiResult.newContext);
       
-      // Envia resposta de texto
-      await sendWhatsAppMessage(phone, aiResult.textReply, true);
-      
-      // Se input foi áudio, responde também com áudio
-      if (aiResult.shouldSendVoice && aiResult.voiceReply) {
-        await delay(500);
-        await sendVoiceResponse(phone, aiResult.voiceReply);
+      // REGRA IMPORTANTE: Respeita o formato de entrada
+      // - Se cliente mandou TEXTO → responde SOMENTE com TEXTO
+      // - Se cliente mandou ÁUDIO → responde SOMENTE com ÁUDIO (voz)
+      if (inputType === "audio") {
+        // Cliente mandou áudio → responde SOMENTE com áudio
+        if (aiResult.voiceReply) {
+          await sendVoiceResponse(phone, aiResult.voiceReply);
+        } else {
+          // Fallback: se não tiver voiceReply, usa textReply como áudio
+          await sendVoiceResponse(phone, aiResult.textReply);
+        }
+      } else {
+        // Cliente mandou texto → responde SOMENTE com texto
+        await sendWhatsAppMessage(phone, aiResult.textReply, true);
       }
       
-      return new Response(JSON.stringify({ status: "ok", mode: "ai" }), {
+      return new Response(JSON.stringify({ status: "ok", mode: "ai", inputType }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
