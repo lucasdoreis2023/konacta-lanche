@@ -874,16 +874,19 @@ Responda APENAS com JSON:
 function getAttendantSystemPrompt(products: Product[], context: ConversationContext, inputType: "text" | "audio"): string {
   const productList = products.map(p => `- ${p.name}: R$ ${p.price.toFixed(2)}${p.description ? ` (${p.description})` : ""}`).join("\n");
   
-  const cartSummary = context.cart.length > 0
-    ? context.cart.map(item => `${item.quantity}x ${item.productName} - R$ ${(item.price * item.quantity).toFixed(2)}`).join("\n")
+  // Garante que cart existe
+  const cart = context.cart || [];
+  
+  const cartSummary = cart.length > 0
+    ? cart.map(item => `${item.quantity}x ${item.productName} - R$ ${(item.price * item.quantity).toFixed(2)}`).join("\n")
     : "Vazio";
   
-  const cartTotal = context.cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
+  const cartTotal = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
   const deliveryFee = context.orderType === "DELIVERY" ? 5 : 0;
 
   // Determina qual dado está faltando para guiar a conversa
   const missingData: string[] = [];
-  if (context.cart.length === 0) missingData.push("ITENS DO PEDIDO");
+  if (cart.length === 0) missingData.push("ITENS DO PEDIDO");
   if (!isValidCustomerName(context.customerName)) missingData.push("NOME");
   if (!context.orderType) missingData.push("TIPO (entrega ou retirada)");
   if (context.orderType === "DELIVERY" && !context.deliveryAddress) missingData.push("ENDEREÇO");
