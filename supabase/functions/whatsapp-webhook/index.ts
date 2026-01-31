@@ -62,9 +62,42 @@ function detectIntent(text: string): { intent: string; confidence: number } {
   return { intent: "unknown", confidence: 0 };
 }
 
+// Converte números por extenso para dígitos
+function convertSpokenNumbersToDigits(text: string): string {
+  const numberWords: Record<string, string> = {
+    // Singular/feminino
+    "uma": "1", "um": "1",
+    // Plural
+    "duas": "2", "dois": "2",
+    "tres": "3", "três": "3",
+    "quatro": "4",
+    "cinco": "5",
+    "seis": "6",
+    "sete": "7",
+    "oito": "8",
+    "nove": "9",
+    "dez": "10",
+  };
+  
+  let result = text;
+  
+  // Substitui números por extenso antes de nomes de produtos
+  // Ex: "duas coca cola" -> "2 coca cola"
+  for (const [word, digit] of Object.entries(numberWords)) {
+    // Usa regex para substituir apenas palavras inteiras
+    const regex = new RegExp(`\\b${word}\\b`, "gi");
+    result = result.replace(regex, digit);
+  }
+  
+  return result;
+}
+
 // Corrige transcrições de pronúncias brasileiras comuns
 function fixTranscriptionPronunciation(text: string): string {
   let fixed = text;
+  
+  // Primeiro converte números por extenso para dígitos
+  fixed = convertSpokenNumbersToDigits(fixed);
   
   // Correções de pronúncia para lanches "X-" (xis)
   // "exi bacon" -> "x-bacon", "xis bacon" -> "x-bacon", "shis bacon" -> "x-bacon"
