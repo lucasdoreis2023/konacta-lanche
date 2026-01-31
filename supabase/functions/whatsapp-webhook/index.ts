@@ -695,6 +695,18 @@ function getAttendantSystemPrompt(products: Product[], context: ConversationCont
   const cartTotal = context.cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
   const deliveryFee = context.orderType === "DELIVERY" ? 5 : 0;
 
+  // Determina qual dado está faltando para guiar a conversa
+  const missingData: string[] = [];
+  if (context.cart.length === 0) missingData.push("ITENS DO PEDIDO");
+  if (!isValidCustomerName(context.customerName)) missingData.push("NOME");
+  if (!context.orderType) missingData.push("TIPO (entrega ou retirada)");
+  if (context.orderType === "DELIVERY" && !context.deliveryAddress) missingData.push("ENDEREÇO");
+  if (!context.paymentMethod) missingData.push("PAGAMENTO");
+  
+  const missingDataInfo = missingData.length > 0 
+    ? `DADOS QUE AINDA FALTAM: ${missingData.join(", ")}`
+    : "TODOS OS DADOS COLETADOS - pode usar confirm_order";
+
   return `Você é um atendente virtual simpático de uma lanchonete. Tom humano, direto e amigável.
 
 REGRAS DE COMUNICAÇÃO (MUITO IMPORTANTE):
@@ -703,6 +715,13 @@ REGRAS DE COMUNICAÇÃO (MUITO IMPORTANTE):
 - Se input_type = audio → responda com texto natural para ser narrado (será convertido em áudio).
 - Seja curto, simpático e objetivo. Faça UMA pergunta por vez.
 - NUNCA invente produtos, preços ou promoções. Use APENAS o cardápio abaixo.
+
+⚠️ REGRA CRÍTICA - NUNCA CONFIRME PEDIDO SEM CRIAR NO SISTEMA:
+- VOCÊ NÃO PODE DIZER "pedido confirmado", "pedido criado", "anotei seu pedido" ou qualquer variação disso
+- A confirmação REAL vem do sistema, não de você
+- Se o cliente pedir para confirmar e faltarem dados, PERGUNTE o dado faltante
+- ${missingDataInfo}
+- Quando faltam dados e o cliente insiste, ofereça a opção de dizer "REVISAR" para registrar e conferirmos depois
 
 CARDÁPIO DISPONÍVEL:
 ${productList}
@@ -718,18 +737,22 @@ ${context.changeFor ? `- Troco para: R$ ${context.changeFor.toFixed(2)}` : ""}
 
 FORMAS DE PAGAMENTO ACEITAS: PIX, Cartão, Dinheiro
 
-FLUXO DE ATENDIMENTO OBRIGATÓRIO:
+FLUXO DE ATENDIMENTO OBRIGATÓRIO (siga na ordem):
 1. Quando cliente mencionar produtos: use action "add_to_cart" com os itens
 2. Depois de adicionar: pergunte se quer mais alguma coisa
-3. Quando disser que é só isso: pergunte entrega ou retirada + use action "set_delivery" ou "set_pickup"
+3. Quando disser que é só isso/finalizar: pergunte entrega ou retirada + use action "set_delivery" ou "set_pickup"
 4. Se entrega: peça endereço e use action "set_address"
 5. Pergunte forma de pagamento e use action "set_payment"
 6. Pergunte o nome do cliente e use action "set_name"
-7. SOMENTE depois de ter TODOS os dados, use action "confirm_order"
+7. SOMENTE COM TODOS OS DADOS COMPLETOS, use action "confirm_order"
+
+PRÓXIMO PASSO RECOMENDADO:
+${missingData.length > 0 ? `Pergunte: ${missingData[0]}` : "Pode confirmar o pedido com action confirm_order"}
 
 REGRA CRÍTICA PARA CONFIRMAR PEDIDO:
 - NUNCA use "confirm_order" se o carrinho estiver vazio
 - NUNCA use "confirm_order" sem ter: itens, tipo (entrega/retirada), pagamento e nome
+- Se tentar confirmar e faltar dado, NÃO diga que confirmou - pergunte o dado faltante
 - Quando usar "confirm_order", DEVE incluir todos os dados em action_data:
   - items: lista completa de itens [{name, quantity}]
   - name: nome do cliente
@@ -748,7 +771,7 @@ SE O CLIENTE PEDIR ALGO QUE NÃO EXISTE:
 
 RESPONDA COM JSON NO FORMATO:
 {
-  "text_reply": "Resposta em texto para o cliente",
+  "text_reply": "Resposta em texto para o cliente (NUNCA diga que o pedido foi confirmado)",
   "voice_reply_script": "Texto natural para ser narrado (se input for áudio)",
   "action": "none|add_to_cart|remove_from_cart|set_delivery|set_pickup|set_address|set_payment|set_name|set_change|confirm_order|request_review|check_status",
   "action_data": {
@@ -907,6 +930,10 @@ async function processWithAI(
         let textReply: string = parsed.text_reply || "Como posso ajudar?";
         let voiceReply: string = parsed.voice_reply_script || textReply;
 
+        // Variáveis para rastrear resultado de ações
+        let actionOrderNumber: number | undefined;
+        let actionSentToReview = false;
+
         // Processa ações
         if (parsed.action && parsed.action !== "none") {
           const actionResult = await processAIAction(
@@ -920,6 +947,8 @@ async function processWithAI(
           );
 
           newContext = actionResult.newContext;
+          actionOrderNumber = actionResult.orderNumber;
+          actionSentToReview = actionResult.sentToReview || false;
 
           // Se a IA tentou confirmar, mas o backend bloqueou (faltou dado / carrinho vazio),
           // sobrescreve a resposta para não mentir que confirmou.
@@ -964,10 +993,26 @@ async function processWithAI(
           }
         }
 
-        // Guardrail: nunca afirmar "pedido confirmado" sem ter executado confirm_order.
+        // Guardrail FORTE: nunca afirmar "pedido confirmado" sem ter executado confirm_order com sucesso.
         // Isso evita que o cliente ouça uma confirmação que não virou pedido no sistema.
-        const saidConfirmed = /pedido\s+(?:ja\s+)?confirmad[oa]/i.test(textReply);
-        if (saidConfirmed && parsed.action !== "confirm_order" && !parsed.action?.includes("review")) {
+        const confirmPatterns = [
+          /pedido\s+(?:ja\s+|foi\s+)?confirmad[oa]/i,
+          /pedido\s+(?:ja\s+|foi\s+)?criad[oa]/i,
+          /pedido\s+(?:ja\s+|foi\s+)?registrad[oa]/i,
+          /anotei\s+(?:o\s+)?seu\s+pedido/i,
+          /seu\s+pedido\s+(?:ja\s+)?(?:foi|esta|está)\s+(?:confirm|anot|registr)/i,
+          /pronto[\!,\.]?\s*seu\s+pedido/i,
+          /pedido\s+(?:n[úu]mero\s+)?#?\d+\s+confirmad/i,
+        ];
+        const saidConfirmed = confirmPatterns.some(pattern => pattern.test(textReply));
+        
+        // Só permite confirmação se foi uma ação de confirm_order bem sucedida (com orderNumber)
+        const wasRealConfirmation = parsed.action === "confirm_order" && actionOrderNumber;
+        const wasReviewConfirmation = (parsed.action === "request_review" || parsed.action === "confirm_order") && actionSentToReview;
+        
+        if (saidConfirmed && !wasRealConfirmation && !wasReviewConfirmation) {
+          // A IA disse que confirmou mas não confirmou de verdade - corrige a resposta
+          console.log("[Guardrail] IA disse confirmado sem criar pedido real. Corrigindo resposta.");
           textReply = "Pra eu confirmar no sistema, me diga só: CONFIRMAR. Ou diga *REVISAR* para registrar e conferirmos depois.";
           voiceReply = "Pra eu confirmar no sistema, me diga só: confirmar. Ou fale revisar para registrar e conferirmos depois.";
         }
