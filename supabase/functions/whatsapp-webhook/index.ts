@@ -27,7 +27,8 @@ type ConversationState =
 // Palavras-chave para detecção de intenção (ordem define prioridade)
 const INTENT_KEYWORDS: Array<[string, string[]]> = [
   // PRIORIDADE 0: Solicitar revisão/atendente humano (MÁXIMA prioridade)
-  ["review", ["revisar", "revisão", "revisao", "atendente", "humano", "pessoa", "falar com alguém", "falar com alguem", "atendimento humano", "quero revisar", "conferir pedido", "confirma pra mim"]],
+  // Obs: manter apenas gatilhos EXPLÍCITOS. Evitar frases ambíguas tipo "confirma pra mim".
+  ["review", ["revisar", "revisão", "revisao", "atendente", "humano", "falar com alguém", "falar com alguem", "atendimento humano", "quero revisar", "quero atendente", "chamar atendente", "falar com atendente"]],
   // PRIORIDADE 1: Finalizar/Fechar (mais importante)
   ["finish", ["finalizar", "finaliza", "fechar", "fecha", "concluir", "só isso", "so isso", "é isso", "e isso", "pronto", "acabou", "terminei", "pode finalizar", "pode fechar", "fecha o pedido", "finaliza o pedido", "finalizar pedido", "fechar pedido"]],
   // PRIORIDADE 2: Confirmação
@@ -143,6 +144,7 @@ function inferCartItemsFromMessage(
   products: Product[]
 ): Array<{ product: Product; quantity: number }> {
   const msg = normalizeText(message);
+  const msgAlt = msg.replace(/-/g, " ");
   if (!msg || msg.length < 3) return [];
 
   // Evita inferência em mensagens que claramente são checkout/controle
@@ -154,16 +156,24 @@ function inferCartItemsFromMessage(
 
   for (const p of products) {
     const pn = normalizeText(p.name);
+    // Ajuda em produtos com hífen (ex.: "coca-cola") vs fala comum ("coca cola")
+    const pnAlt = pn.replace(/-/g, " ");
     if (!pn) continue;
 
-    const directHit = msg.includes(pn);
-    const reverseHit = pn.includes(msg) && msg.length >= 4;
+    const directHit = msg.includes(pn) || msgAlt.includes(pnAlt);
+    const reverseHit = (pn.includes(msg) || pnAlt.includes(msgAlt)) && msg.length >= 4;
     if (!directHit && !reverseHit) continue;
 
     // Tenta inferir quantidade (ex.: "2 x-tudo")
     const firstWord = pn.split(" ")[0];
+    const firstWordAlt = pnAlt.split(" ")[0];
+
     const qtyRe = new RegExp(`\\b(\\d+)\\s*(?:x\\s*)?(?:${escapeRegExp(firstWord)})\\b`);
-    const qtyMatch = msg.match(qtyRe);
+    const qtyReAlt = firstWordAlt && firstWordAlt !== firstWord
+      ? new RegExp(`\\b(\\d+)\\s*(?:x\\s*)?(?:${escapeRegExp(firstWordAlt)})\\b`)
+      : null;
+
+    const qtyMatch = msg.match(qtyRe) || (qtyReAlt ? msgAlt.match(qtyReAlt) : null);
     const qty = qtyMatch ? Math.max(1, Number(qtyMatch[1])) : 1;
 
     matches.push({ product: p, quantity: qty, score: pn.length });
@@ -645,13 +655,42 @@ async function sendWhatsAppAudio(phone: string, audioBuffer: ArrayBuffer): Promi
 
 // Envia resposta de voz (TTS) para o cliente
 async function sendVoiceResponse(phone: string, text: string): Promise<void> {
+  const numberToPt = (n: number): string => {
+    const map: Record<number, string> = {
+      1: "uma",
+      2: "duas",
+      3: "três",
+      4: "quatro",
+      5: "cinco",
+      6: "seis",
+      7: "sete",
+      8: "oito",
+      9: "nove",
+      10: "dez",
+    };
+    return map[n] ?? String(n);
+  };
+
+  const formatQuantitiesForTTS = (input: string): string => {
+    // Troca "2x Coca-Cola" -> "duas unidades de Coca-Cola" (evita o TTS falar "dois xis")
+    return input.replace(/\b(\d+)\s*x\s*/gi, (_m, numStr) => {
+      const n = Number(numStr);
+      if (!Number.isFinite(n) || n <= 0) return "";
+      const w = numberToPt(n);
+      return `${w} ${n === 1 ? "unidade de" : "unidades de"} `;
+    });
+  };
+
   // Remove emojis e formatação para TTS
-  const cleanText = text
+  const cleanText = formatQuantitiesForTTS(
+    text
     .replace(/\*([^*]+)\*/g, "$1") // Remove negrito
     .replace(/[🎤📝🛒💰✅❌📋🍔🍟👋🎉📦💛🔥🏃🛵💳💵📱📍🗑️😕🤔😊😋👨‍🍳📥📭🔄❓]/g, "")
+    .replace(/[•]/g, "")
     .replace(/\n{2,}/g, ". ")
     .replace(/\n/g, ", ")
-    .trim();
+    .trim()
+  );
 
   if (!cleanText || cleanText.length < 5) return;
 
@@ -1253,8 +1292,8 @@ async function processWithAI(
           if (parsed.action === "confirm_order") {
             if (actionResult.sentToReview && actionResult.orderNumber) {
               // Pedido foi para revisão
-              textReply = `📋 Seu pedido foi registrado como #${actionResult.orderNumber} e está *EM REVISÃO*. Um atendente vai conferir e entrar em contato se precisar de mais informações!`;
-              voiceReply = `Seu pedido foi registrado com número ${actionResult.orderNumber} e está em revisão. Um atendente vai conferir e entrar em contato se precisar de mais informações!`;
+              textReply = `📋 Seu pedido foi registrado como #${actionResult.orderNumber} e foi encaminhado para conferência com um atendente. Ele pode entrar em contato se precisar de mais informações.`;
+              voiceReply = `Seu pedido foi registrado com número ${actionResult.orderNumber} e foi encaminhado para conferência com um atendente. Ele pode entrar em contato se precisar de mais informações.`;
             } else if (actionResult.orderNumber) {
               textReply = `✅ Pedido confirmado! Número #${actionResult.orderNumber}. Vou te atualizando por aqui.`;
               voiceReply = `Perfeito! Seu pedido ficou confirmado. Número ${actionResult.orderNumber}. Vou te atualizando por aqui.`;
@@ -1278,16 +1317,16 @@ async function processWithAI(
               } else if (blocked === "sent_to_review") {
                 // Já tratado acima
               } else {
-                textReply = "Tive um probleminha pra confirmar seu pedido agora. Pode tentar de novo ou dizer *REVISAR*?";
-                voiceReply = "Tive um probleminha pra confirmar seu pedido agora. Pode tentar de novo ou dizer revisar?";
+                textReply = "Tive um probleminha pra confirmar seu pedido agora. Pode tentar de novo?";
+                voiceReply = "Tive um probleminha pra confirmar seu pedido agora. Pode tentar de novo?";
               }
             }
           }
 
           // Trata ação de request_review
           if (parsed.action === "request_review" && actionResult.orderNumber) {
-            textReply = `📋 Seu pedido foi registrado como #${actionResult.orderNumber} e está *EM REVISÃO*. Um atendente vai conferir e entrar em contato!`;
-            voiceReply = `Seu pedido foi registrado com número ${actionResult.orderNumber} e está em revisão. Um atendente vai conferir e entrar em contato!`;
+            textReply = `📋 Seu pedido foi registrado como #${actionResult.orderNumber} e foi encaminhado para conferência com um atendente. Ele já vai verificar e, se precisar, entra em contato.`;
+            voiceReply = `Seu pedido foi registrado com número ${actionResult.orderNumber} e foi encaminhado para conferência com um atendente. Ele já vai verificar e, se precisar, entra em contato.`;
           }
         }
 
@@ -1337,8 +1376,8 @@ async function processWithAI(
             actionSentToReview = autoConfirm.sentToReview || false;
 
             if (actionSentToReview && actionOrderNumber) {
-              textReply = `📋 Seu pedido foi registrado como #${actionOrderNumber} e está *EM REVISÃO*. Um atendente vai conferir e entrar em contato se precisar de mais informações!`;
-              voiceReply = `Seu pedido foi registrado com número ${actionOrderNumber} e está em revisão. Um atendente vai conferir e entrar em contato se precisar de mais informações!`;
+              textReply = `📋 Seu pedido foi registrado como #${actionOrderNumber} e foi encaminhado para conferência com um atendente. Ele pode entrar em contato se precisar de mais informações.`;
+              voiceReply = `Seu pedido foi registrado com número ${actionOrderNumber} e foi encaminhado para conferência com um atendente. Ele pode entrar em contato se precisar de mais informações.`;
             } else if (actionOrderNumber) {
               textReply = `✅ Pedido confirmado! Número #${actionOrderNumber}. Vou te atualizando por aqui.`;
               voiceReply = `Perfeito! Seu pedido ficou confirmado. Número ${actionOrderNumber}. Vou te atualizando por aqui.`;
@@ -1460,7 +1499,7 @@ async function processWithAI(
       newContext = autoConfirm.newContext;
 
       if (autoConfirm.sentToReview && autoConfirm.orderNumber) {
-        safeReply = `📋 Seu pedido foi registrado como #${autoConfirm.orderNumber} e está *EM REVISÃO*. Um atendente vai conferir e entrar em contato se precisar de mais informações!`;
+        safeReply = `📋 Seu pedido foi registrado como #${autoConfirm.orderNumber} e foi encaminhado para conferência com um atendente. Ele pode entrar em contato se precisar de mais informações.`;
       } else if (autoConfirm.orderNumber) {
         safeReply = `✅ Pedido confirmado! Número #${autoConfirm.orderNumber}. Vou te atualizando por aqui.`;
       } else if (autoConfirm.confirmOrderBlocked) {
