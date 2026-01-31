@@ -753,6 +753,20 @@ RESPONDA COM JSON NO FORMATO:
 }`;
 }
 
+type ConfirmOrderBlockReason =
+  | "missing_items"
+  | "missing_name"
+  | "missing_order_type"
+  | "missing_address"
+  | "missing_payment"
+  | "create_failed";
+
+type AIActionResult = {
+  newContext: ConversationContext;
+  orderNumber?: number;
+  confirmOrderBlocked?: ConfirmOrderBlockReason;
+};
+
 // Processa mensagem com IA (DeepSeek)
 async function processWithAI(
   supabase: ReturnType<typeof getSupabase>,
@@ -857,20 +871,52 @@ async function processWithAI(
     if (jsonMatch) {
       try {
         const parsed = JSON.parse(jsonMatch[0]);
-        
-        const textReply = parsed.text_reply || "Como posso ajudar?";
-        const voiceReply = parsed.voice_reply_script || textReply;
-        
+
+        let textReply: string = parsed.text_reply || "Como posso ajudar?";
+        let voiceReply: string = parsed.voice_reply_script || textReply;
+
         // Processa ações
         if (parsed.action && parsed.action !== "none") {
-          newContext = await processAIAction(
-            supabase, 
-            phone, 
-            parsed.action, 
-            parsed.action_data || {}, 
+          const actionResult = await processAIAction(
+            supabase,
+            phone,
+            parsed.action,
+            parsed.action_data || {},
             newContext,
             products
           );
+
+          newContext = actionResult.newContext;
+
+          // Se a IA tentou confirmar, mas o backend bloqueou (faltou dado / carrinho vazio),
+          // sobrescreve a resposta para não mentir que confirmou.
+          if (parsed.action === "confirm_order") {
+            if (actionResult.orderNumber) {
+              textReply = `✅ Pedido confirmado! Número #${actionResult.orderNumber}. Vou te atualizando por aqui.`;
+              voiceReply = `Perfeito! Seu pedido ficou confirmado. Número ${actionResult.orderNumber}. Vou te atualizando por aqui.`;
+            } else if (actionResult.confirmOrderBlocked) {
+              const blocked = actionResult.confirmOrderBlocked;
+              if (blocked === "missing_items") {
+                textReply = "Antes de confirmar, me diz quais itens você quer no pedido (ex.: 1 X-Tudo e 1 Coca-Cola Lata).";
+                voiceReply = "Antes de confirmar, me diz quais itens você quer no pedido. Por exemplo: um X-Tudo e uma Coca-Cola lata.";
+              } else if (blocked === "missing_name") {
+                textReply = "Show! Pra confirmar, me diz seu nome.";
+                voiceReply = "Show! Pra eu confirmar o pedido, me diz seu nome.";
+              } else if (blocked === "missing_order_type") {
+                textReply = "Vai ser entrega ou retirada?";
+                voiceReply = "Vai ser entrega ou retirada?";
+              } else if (blocked === "missing_address") {
+                textReply = "Perfeito. Me passa seu endereço completo, por favor (rua, número, bairro e complemento).";
+                voiceReply = "Perfeito. Me passa seu endereço completo, por favor. Rua, número, bairro e complemento.";
+              } else if (blocked === "missing_payment") {
+                textReply = "Como você prefere pagar: Pix, cartão ou dinheiro?";
+                voiceReply = "Como você prefere pagar: Pix, cartão ou dinheiro?";
+              } else {
+                textReply = "Tive um probleminha pra confirmar seu pedido agora. Pode tentar de novo?";
+                voiceReply = "Tive um probleminha pra confirmar seu pedido agora. Pode tentar de novo?";
+              }
+            }
+          }
         }
         
         // Adiciona resposta ao histórico
@@ -925,8 +971,10 @@ async function processAIAction(
   actionData: any,
   context: ConversationContext,
   products: Product[]
-): Promise<ConversationContext> {
+): Promise<AIActionResult> {
   let newContext = { ...context };
+  let orderNumber: number | undefined;
+  let confirmOrderBlocked: ConfirmOrderBlockReason | undefined;
   
   console.log(`[AI Action] ${action}:`, JSON.stringify(actionData));
   
@@ -1057,26 +1105,36 @@ async function processAIAction(
       // Valida se temos tudo necessário
       if (newContext.cart.length === 0) {
         console.error("[AI Action] ERRO: Tentativa de confirmar pedido com carrinho vazio!");
+        confirmOrderBlocked = "missing_items";
         break;
       }
       
       if (!newContext.customerName) {
         console.error("[AI Action] ERRO: Tentativa de confirmar pedido sem nome do cliente!");
+        confirmOrderBlocked = "missing_name";
         break;
       }
       
       if (!newContext.orderType) {
         console.error("[AI Action] ERRO: Tentativa de confirmar pedido sem tipo (entrega/retirada)!");
+        confirmOrderBlocked = "missing_order_type";
+        break;
+      }
+
+      if (newContext.orderType === "DELIVERY" && !newContext.deliveryAddress) {
+        console.error("[AI Action] ERRO: Tentativa de confirmar delivery sem endereço!");
+        confirmOrderBlocked = "missing_address";
         break;
       }
       
       if (!newContext.paymentMethod) {
         console.error("[AI Action] ERRO: Tentativa de confirmar pedido sem forma de pagamento!");
+        confirmOrderBlocked = "missing_payment";
         break;
       }
       
       // Cria o pedido no banco
-      const orderNumber = await createOrder(supabase, newContext, phone);
+      orderNumber = (await createOrder(supabase, newContext, phone)) ?? undefined;
       if (orderNumber) {
         console.log(`[AI Action] Pedido criado com sucesso: #${orderNumber}`);
         console.log(`[AI Action] Itens: ${newContext.cart.map(i => `${i.quantity}x ${i.productName}`).join(", ")}`);
@@ -1089,6 +1147,7 @@ async function processAIAction(
         };
       } else {
         console.error("[AI Action] ERRO: Falha ao criar pedido no banco!");
+        confirmOrderBlocked = "create_failed";
       }
       break;
       
@@ -1096,8 +1155,8 @@ async function processAIAction(
       // Status será buscado e retornado pela IA
       break;
   }
-  
-  return newContext;
+
+  return { newContext, orderNumber, confirmOrderBlocked };
 }
 
 // Formata preço
