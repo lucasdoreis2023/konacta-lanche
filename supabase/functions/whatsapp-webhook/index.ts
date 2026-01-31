@@ -443,7 +443,7 @@ async function sendMultipleMessages(phone: string, messages: string[]): Promise<
 // ============ FUNÇÕES DE AGRUPAMENTO DE MENSAGENS ============
 
 // Configuração do agrupamento de mensagens
-const MESSAGE_GROUPING_DELAY_MS = 7000; // 7 segundos de espera antes de processar
+const MESSAGE_GROUPING_DELAY_MS = 3000; // 3 segundos de espera antes de processar
 
 // Salva mensagem pendente para agrupamento
 async function savePendingMessage(
