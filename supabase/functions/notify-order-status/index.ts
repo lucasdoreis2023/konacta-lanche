@@ -365,12 +365,19 @@ Deno.serve(async (req) => {
         // Limpa o telefone para o formato usado na tabela
         const cleanPhone = customerPhone.replace(/\D/g, "");
         
-        // Reseta a sessão de conversa
+        // Reseta a sessão de conversa completamente
         const { error } = await supabase
           .from("conversation_sessions")
           .update({
             current_state: "WELCOME",
-            context_json: {},
+            context_json: { 
+              cart: [], 
+              conversationHistory: [],
+              customerName: null,
+              orderType: null,
+              deliveryAddress: null,
+              paymentMethod: null
+            },
             updated_at: new Date().toISOString(),
           })
           .eq("phone_number", cleanPhone);
