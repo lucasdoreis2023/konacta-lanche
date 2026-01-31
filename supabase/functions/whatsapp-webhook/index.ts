@@ -714,15 +714,24 @@ ${context.changeFor ? `- Troco para: R$ ${context.changeFor.toFixed(2)}` : ""}
 
 FORMAS DE PAGAMENTO ACEITAS: PIX, Cartão, Dinheiro
 
-FLUXO DE ATENDIMENTO:
-1. Se cliente quer pedir: identifique os itens do cardápio e quantidades
-2. Confirme os itens antes de adicionar ao carrinho
-3. Pergunte se quer mais alguma coisa
-4. Quando finalizar: pergunte entrega ou retirada
-5. Se entrega: peça endereço completo
-6. Pergunte forma de pagamento
-7. Se dinheiro: pergunte se precisa de troco e para quanto
-8. Mostre resumo e peça confirmação final
+FLUXO DE ATENDIMENTO OBRIGATÓRIO:
+1. Quando cliente mencionar produtos: use action "add_to_cart" com os itens
+2. Depois de adicionar: pergunte se quer mais alguma coisa
+3. Quando disser que é só isso: pergunte entrega ou retirada + use action "set_delivery" ou "set_pickup"
+4. Se entrega: peça endereço e use action "set_address"
+5. Pergunte forma de pagamento e use action "set_payment"
+6. Pergunte o nome do cliente e use action "set_name"
+7. SOMENTE depois de ter TODOS os dados, use action "confirm_order"
+
+REGRA CRÍTICA PARA CONFIRMAR PEDIDO:
+- NUNCA use "confirm_order" se o carrinho estiver vazio
+- NUNCA use "confirm_order" sem ter: itens, tipo (entrega/retirada), pagamento e nome
+- Quando usar "confirm_order", DEVE incluir todos os dados em action_data:
+  - items: lista completa de itens [{name, quantity}]
+  - name: nome do cliente
+  - delivery_type: "DELIVERY" ou "PRESENCIAL"
+  - address: endereço (se delivery)
+  - payment: forma de pagamento
 
 SE O CLIENTE PEDIR ALGO QUE NÃO EXISTE:
 - Peça desculpas de forma leve
@@ -732,13 +741,14 @@ RESPONDA COM JSON NO FORMATO:
 {
   "text_reply": "Resposta em texto para o cliente",
   "voice_reply_script": "Texto natural para ser narrado (se input for áudio)",
-  "action": "none|add_to_cart|remove_from_cart|set_delivery|set_pickup|set_address|set_payment|set_change|confirm_order|check_status",
+  "action": "none|add_to_cart|remove_from_cart|set_delivery|set_pickup|set_address|set_payment|set_name|set_change|confirm_order|check_status",
   "action_data": {
-    "items": [{"name": "Nome do Produto", "quantity": 1}],
-    "address": "endereço se informado",
+    "items": [{"name": "Nome Exato do Produto", "quantity": 1}],
+    "name": "nome do cliente",
+    "delivery_type": "DELIVERY ou PRESENCIAL",
+    "address": "endereço completo se entrega",
     "payment": "PIX|CARTAO|DINHEIRO",
-    "change_for": 50,
-    "order_number": 123
+    "change_for": 50
   }
 }`;
 }
@@ -1000,15 +1010,85 @@ async function processAIAction(
       break;
       
     case "confirm_order":
+      // Valida que temos dados suficientes para criar o pedido
+      console.log(`[AI Action] confirm_order - Carrinho: ${newContext.cart.length} itens, Nome: ${newContext.customerName}, Tipo: ${newContext.orderType}, Pagamento: ${newContext.paymentMethod}`);
+      
+      // Se action_data tiver itens, adiciona ao carrinho primeiro
+      if (actionData.items && Array.isArray(actionData.items) && actionData.items.length > 0) {
+        // Limpa carrinho e adiciona os itens do action_data
+        newContext.cart = [];
+        for (const item of actionData.items) {
+          const product = products.find(p => 
+            p.name.toLowerCase().includes(item.name.toLowerCase()) ||
+            item.name.toLowerCase().includes(p.name.toLowerCase())
+          );
+          
+          if (product) {
+            newContext.cart.push({
+              productId: product.id,
+              productName: product.name,
+              quantity: item.quantity || 1,
+              price: product.price
+            });
+            console.log(`[AI Action] Item adicionado via confirm: ${item.quantity || 1}x ${product.name}`);
+          }
+        }
+      }
+      
+      // Atualiza dados do contexto se vieram no action_data
+      if (actionData.name) {
+        newContext.customerName = actionData.name;
+      }
+      if (actionData.delivery_type) {
+        newContext.orderType = actionData.delivery_type === "DELIVERY" ? "DELIVERY" : "PRESENCIAL";
+      }
+      if (actionData.address) {
+        newContext.deliveryAddress = actionData.address;
+      }
+      if (actionData.payment) {
+        const paymentMap: Record<string, "PIX" | "CARTAO" | "DINHEIRO"> = {
+          "pix": "PIX", "PIX": "PIX",
+          "cartao": "CARTAO", "cartão": "CARTAO", "CARTAO": "CARTAO",
+          "dinheiro": "DINHEIRO", "DINHEIRO": "DINHEIRO",
+        };
+        newContext.paymentMethod = paymentMap[actionData.payment] || actionData.payment;
+      }
+      
+      // Valida se temos tudo necessário
+      if (newContext.cart.length === 0) {
+        console.error("[AI Action] ERRO: Tentativa de confirmar pedido com carrinho vazio!");
+        break;
+      }
+      
+      if (!newContext.customerName) {
+        console.error("[AI Action] ERRO: Tentativa de confirmar pedido sem nome do cliente!");
+        break;
+      }
+      
+      if (!newContext.orderType) {
+        console.error("[AI Action] ERRO: Tentativa de confirmar pedido sem tipo (entrega/retirada)!");
+        break;
+      }
+      
+      if (!newContext.paymentMethod) {
+        console.error("[AI Action] ERRO: Tentativa de confirmar pedido sem forma de pagamento!");
+        break;
+      }
+      
       // Cria o pedido no banco
       const orderNumber = await createOrder(supabase, newContext, phone);
       if (orderNumber) {
-        console.log(`[AI Action] Pedido criado: #${orderNumber}`);
+        console.log(`[AI Action] Pedido criado com sucesso: #${orderNumber}`);
+        console.log(`[AI Action] Itens: ${newContext.cart.map(i => `${i.quantity}x ${i.productName}`).join(", ")}`);
+        console.log(`[AI Action] Total: R$ ${newContext.cart.reduce((sum, i) => sum + i.price * i.quantity, 0).toFixed(2)}`);
+        
         // Limpa contexto após pedido confirmado
         newContext = { 
           cart: [],
           conversationHistory: newContext.conversationHistory 
         };
+      } else {
+        console.error("[AI Action] ERRO: Falha ao criar pedido no banco!");
       }
       break;
       
