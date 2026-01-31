@@ -125,6 +125,7 @@ export type Database = {
           delivery_address: string | null
           delivery_fee: number | null
           id: string
+          input_type: string | null
           notes: string | null
           order_number: number
           order_type: Database["public"]["Enums"]["order_type"]
@@ -142,6 +143,7 @@ export type Database = {
           delivery_address?: string | null
           delivery_fee?: number | null
           id?: string
+          input_type?: string | null
           notes?: string | null
           order_number?: number
           order_type?: Database["public"]["Enums"]["order_type"]
@@ -159,6 +161,7 @@ export type Database = {
           delivery_address?: string | null
           delivery_fee?: number | null
           id?: string
+          input_type?: string | null
           notes?: string | null
           order_number?: number
           order_type?: Database["public"]["Enums"]["order_type"]

@@ -25,6 +25,8 @@ export interface Product {
   updated_at: string;
 }
 
+export type InputType = 'text' | 'audio';
+
 export interface Order {
   id: string;
   order_number: number;
@@ -39,6 +41,7 @@ export interface Order {
   delivery_fee: number;
   total: number;
   notes: string | null;
+  input_type: string | null; // 'text' ou 'audio' - vem como string do banco
   created_at: string;
   updated_at: string;
 }

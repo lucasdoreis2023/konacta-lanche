@@ -14,7 +14,7 @@ const getSupabase = () => {
   );
 };
 
-// Envia mensagem via Evolution API
+// Envia mensagem de texto via Evolution API
 async function sendWhatsAppMessage(phone: string, message: string): Promise<boolean> {
   let evolutionUrl = Deno.env.get("EVOLUTION_API_URL");
   const evolutionKey = Deno.env.get("EVOLUTION_API_KEY");
@@ -25,7 +25,6 @@ async function sendWhatsAppMessage(phone: string, message: string): Promise<bool
     return false;
   }
 
-  // Remove trailing slash e /manager se existir
   evolutionUrl = evolutionUrl.replace(/\/manager\/?$/, "").replace(/\/$/, "");
   
   const url = `${evolutionUrl}/message/sendText/${instanceName}`;
@@ -55,6 +54,126 @@ async function sendWhatsAppMessage(phone: string, message: string): Promise<bool
   }
 }
 
+// Gera áudio TTS via ElevenLabs
+async function generateTTSAudio(text: string): Promise<ArrayBuffer | null> {
+  const ELEVENLABS_API_KEY = Deno.env.get("ELEVENLABS_API_KEY");
+  
+  if (!ELEVENLABS_API_KEY) {
+    console.error("ELEVENLABS_API_KEY não configurada para TTS");
+    return null;
+  }
+
+  // Voice ID: Ana Alice - Amigável e Clara (português brasileiro)
+  const voiceId = "ORgG8rwdAiMYRug8RJwR";
+
+  try {
+    const response = await fetch(
+      `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=mp3_44100_128`,
+      {
+        method: "POST",
+        headers: {
+          "xi-api-key": ELEVENLABS_API_KEY,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          text,
+          model_id: "eleven_turbo_v2_5",
+          voice_settings: {
+            stability: 0.5,
+            similarity_boost: 0.75,
+            style: 0.3,
+            use_speaker_boost: true,
+            speed: 1.1,
+          },
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      console.error("Erro ElevenLabs TTS:", response.status, await response.text());
+      return null;
+    }
+
+    return await response.arrayBuffer();
+  } catch (error) {
+    console.error("Erro ao gerar áudio TTS:", error);
+    return null;
+  }
+}
+
+// Envia mensagem de áudio via Evolution API
+async function sendWhatsAppAudio(phone: string, audioBuffer: ArrayBuffer): Promise<boolean> {
+  let evolutionUrl = Deno.env.get("EVOLUTION_API_URL");
+  const evolutionKey = Deno.env.get("EVOLUTION_API_KEY");
+  const instanceName = Deno.env.get("EVOLUTION_INSTANCE_NAME");
+
+  if (!evolutionUrl || !evolutionKey || !instanceName) {
+    console.error("Evolution API não configurada para áudio");
+    return false;
+  }
+
+  evolutionUrl = evolutionUrl.replace(/\/manager\/?$/, "").replace(/\/$/, "");
+  const url = `${evolutionUrl}/message/sendWhatsAppAudio/${instanceName}`;
+
+  try {
+    // Converte ArrayBuffer para base64
+    const bytes = new Uint8Array(audioBuffer);
+    let binary = "";
+    const len = bytes.byteLength;
+    for (let i = 0; i < len; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    const base64Audio = btoa(binary);
+
+    console.log(`Enviando áudio de status para ${phone}, tamanho: ${bytes.length} bytes`);
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        apikey: evolutionKey,
+      },
+      body: JSON.stringify({
+        number: phone,
+        audio: base64Audio,
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error("Erro ao enviar áudio:", response.status, errorText);
+      
+      // Fallback: tenta endpoint alternativo
+      const altUrl = `${evolutionUrl}/message/sendPtv/${instanceName}`;
+      const altResponse = await fetch(altUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          apikey: evolutionKey,
+        },
+        body: JSON.stringify({
+          number: phone,
+          audio: base64Audio,
+        }),
+      });
+      
+      if (!altResponse.ok) {
+        console.error("Fallback também falhou:", altResponse.status, await altResponse.text());
+        return false;
+      }
+      
+      console.log("Áudio enviado via endpoint alternativo");
+      return true;
+    }
+
+    console.log("Áudio de status enviado com sucesso");
+    return true;
+  } catch (error) {
+    console.error("Erro ao enviar áudio WhatsApp:", error);
+    return false;
+  }
+}
+
 // Formata preço
 function formatPrice(price: number): string {
   return new Intl.NumberFormat("pt-BR", {
@@ -63,7 +182,7 @@ function formatPrice(price: number): string {
   }).format(price);
 }
 
-// Gera mensagem baseada no status
+// Gera mensagem baseada no status (para texto)
 function getStatusMessage(
   orderNumber: number, 
   status: string, 
@@ -94,6 +213,38 @@ function getStatusMessage(
   }
 }
 
+// Gera texto para áudio (mais natural, sem emojis)
+function getStatusVoiceScript(
+  orderNumber: number, 
+  status: string, 
+  customerName: string | null,
+  orderType: string,
+  total: number
+): string {
+  const greeting = customerName ? `Olá, ${customerName}!` : "Olá!";
+  const totalFormatted = formatPrice(total).replace("R$", "reais");
+  
+  switch (status) {
+    case "EM_PREPARO":
+      return `${greeting} Seu pedido número ${orderNumber} está sendo preparado! Nossa equipe já começou a preparar com muito carinho. Você receberá uma mensagem quando estiver pronto. O total é ${totalFormatted}.`;
+    
+    case "PRONTO":
+      if (orderType === "DELIVERY") {
+        return `${greeting} Seu pedido número ${orderNumber} saiu para entrega! Prepara-se, seu pedido está a caminho. Agradecemos a preferência!`;
+      }
+      return `${greeting} Seu pedido número ${orderNumber} está pronto! Você já pode retirar no balcão. Agradecemos a preferência!`;
+    
+    case "ENTREGUE":
+      return `${greeting} Pedido número ${orderNumber} entregue com sucesso! Esperamos que aproveite. Volte sempre!`;
+    
+    case "CANCELADO":
+      return `${greeting} Pedido número ${orderNumber} foi cancelado. Se tiver dúvidas, entre em contato conosco.`;
+    
+    default:
+      return `${greeting} Atualização do pedido número ${orderNumber}. Status: ${status}.`;
+  }
+}
+
 // Handler principal - chamado quando o status do pedido muda
 Deno.serve(async (req) => {
   // CORS preflight
@@ -105,7 +256,7 @@ Deno.serve(async (req) => {
     const body = await req.json();
     console.log("Notify order status recebido:", JSON.stringify(body));
 
-    const { orderId, orderNumber, status, customerPhone, customerName, orderType, total } = body;
+    const { orderId, orderNumber, status, customerPhone, customerName, orderType, total, inputType } = body;
 
     // Valida dados obrigatórios
     if (!orderNumber || !status || !customerPhone) {
@@ -129,16 +280,36 @@ Deno.serve(async (req) => {
       );
     }
 
-    // Gera mensagem personalizada
-    const message = getStatusMessage(orderNumber, status, customerName, orderType, total);
-
-    // Envia notificação via WhatsApp
-    const success = await sendWhatsAppMessage(customerPhone, message);
+    let success = false;
+    
+    // Se o pedido foi feito por áudio, envia notificação por áudio
+    if (inputType === "audio") {
+      console.log(`Enviando notificação por ÁUDIO para ${customerPhone}`);
+      
+      const voiceScript = getStatusVoiceScript(orderNumber, status, customerName, orderType, total);
+      const audioBuffer = await generateTTSAudio(voiceScript);
+      
+      if (audioBuffer) {
+        success = await sendWhatsAppAudio(customerPhone, audioBuffer);
+      }
+      
+      // Fallback: se falhar o áudio, envia texto
+      if (!success) {
+        console.log("Fallback para texto após falha no áudio");
+        const message = getStatusMessage(orderNumber, status, customerName, orderType, total);
+        success = await sendWhatsAppMessage(customerPhone, message);
+      }
+    } else {
+      // Pedido feito por texto: envia notificação por texto
+      console.log(`Enviando notificação por TEXTO para ${customerPhone}`);
+      const message = getStatusMessage(orderNumber, status, customerName, orderType, total);
+      success = await sendWhatsAppMessage(customerPhone, message);
+    }
 
     if (success) {
-      console.log(`Notificação enviada para ${customerPhone}: Pedido #${orderNumber} - ${status}`);
+      console.log(`Notificação enviada para ${customerPhone}: Pedido #${orderNumber} - ${status} (${inputType || 'text'})`);
       return new Response(
-        JSON.stringify({ status: "sent", orderNumber, customerPhone }),
+        JSON.stringify({ status: "sent", orderNumber, customerPhone, notificationType: inputType || "text" }),
         {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         }
