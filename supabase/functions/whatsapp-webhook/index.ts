@@ -26,6 +26,8 @@ type ConversationState =
 
 // Palavras-chave para detecção de intenção (ordem define prioridade)
 const INTENT_KEYWORDS: Array<[string, string[]]> = [
+  // PRIORIDADE 0: Solicitar revisão/atendente humano (MÁXIMA prioridade)
+  ["review", ["revisar", "revisão", "revisao", "atendente", "humano", "pessoa", "falar com alguém", "falar com alguem", "atendimento humano", "quero revisar", "conferir pedido", "confirma pra mim"]],
   // PRIORIDADE 1: Finalizar/Fechar (mais importante)
   ["finish", ["finalizar", "finaliza", "fechar", "fecha", "concluir", "só isso", "so isso", "é isso", "e isso", "pronto", "acabou", "terminei", "pode finalizar", "pode fechar", "fecha o pedido", "finaliza o pedido", "finalizar pedido", "fechar pedido"]],
   // PRIORIDADE 2: Confirmação
@@ -76,6 +78,8 @@ interface ConversationContext {
   conversationHistory?: Array<{ role: "user" | "assistant"; content: string; inputType?: "text" | "audio" }>;
   // Troco necessário (se pagamento em dinheiro)
   changeFor?: number;
+  // Contador de tentativas de confirmação com dados faltantes (para auto-revisão)
+  confirmAttempts?: number;
 }
 
 interface Category {
@@ -733,6 +737,11 @@ REGRA CRÍTICA PARA CONFIRMAR PEDIDO:
   - address: endereço (se delivery)
   - payment: forma de pagamento
 
+MODO REVISÃO (IMPORTANTE):
+- Se cliente disser "REVISAR", "REVISÃO", "ATENDENTE", "HUMANO", "FALAR COM ALGUÉM": use action "request_review"
+- Isso registra o pedido no sistema para conferência manual
+- Informe que o pedido foi registrado e um atendente vai conferir
+
 SE O CLIENTE PEDIR ALGO QUE NÃO EXISTE:
 - Peça desculpas de forma leve
 - Ofereça 2-3 alternativas do cardápio
@@ -741,7 +750,7 @@ RESPONDA COM JSON NO FORMATO:
 {
   "text_reply": "Resposta em texto para o cliente",
   "voice_reply_script": "Texto natural para ser narrado (se input for áudio)",
-  "action": "none|add_to_cart|remove_from_cart|set_delivery|set_pickup|set_address|set_payment|set_name|set_change|confirm_order|check_status",
+  "action": "none|add_to_cart|remove_from_cart|set_delivery|set_pickup|set_address|set_payment|set_name|set_change|confirm_order|request_review|check_status",
   "action_data": {
     "items": [{"name": "Nome Exato do Produto", "quantity": 1}],
     "name": "nome do cliente",
@@ -759,12 +768,14 @@ type ConfirmOrderBlockReason =
   | "missing_order_type"
   | "missing_address"
   | "missing_payment"
-  | "create_failed";
+  | "create_failed"
+  | "sent_to_review"; // Pedido foi registrado como revisão
 
 type AIActionResult = {
   newContext: ConversationContext;
   orderNumber?: number;
   confirmOrderBlocked?: ConfirmOrderBlockReason;
+  sentToReview?: boolean; // Flag indicando que foi para revisão
 };
 
 function isValidCustomerName(name: unknown): name is string {
@@ -913,7 +924,11 @@ async function processWithAI(
           // Se a IA tentou confirmar, mas o backend bloqueou (faltou dado / carrinho vazio),
           // sobrescreve a resposta para não mentir que confirmou.
           if (parsed.action === "confirm_order") {
-            if (actionResult.orderNumber) {
+            if (actionResult.sentToReview && actionResult.orderNumber) {
+              // Pedido foi para revisão
+              textReply = `📋 Seu pedido foi registrado como #${actionResult.orderNumber} e está *EM REVISÃO*. Um atendente vai conferir e entrar em contato se precisar de mais informações!`;
+              voiceReply = `Seu pedido foi registrado com número ${actionResult.orderNumber} e está em revisão. Um atendente vai conferir e entrar em contato se precisar de mais informações!`;
+            } else if (actionResult.orderNumber) {
               textReply = `✅ Pedido confirmado! Número #${actionResult.orderNumber}. Vou te atualizando por aqui.`;
               voiceReply = `Perfeito! Seu pedido ficou confirmado. Número ${actionResult.orderNumber}. Vou te atualizando por aqui.`;
             } else if (actionResult.confirmOrderBlocked) {
@@ -922,31 +937,39 @@ async function processWithAI(
                 textReply = "Antes de confirmar, me diz quais itens você quer no pedido (ex.: 1 X-Tudo e 1 Coca-Cola Lata).";
                 voiceReply = "Antes de confirmar, me diz quais itens você quer no pedido. Por exemplo: um X-Tudo e uma Coca-Cola lata.";
               } else if (blocked === "missing_name") {
-                textReply = "Show! Pra confirmar, me diz seu nome.";
-                voiceReply = "Show! Pra eu confirmar o pedido, me diz seu nome.";
+                textReply = "Show! Pra confirmar, me diz seu nome. Ou diga *REVISAR* pra gente registrar e conferir depois.";
+                voiceReply = "Show! Pra eu confirmar o pedido, me diz seu nome. Ou fale revisar pra gente registrar e conferir depois.";
               } else if (blocked === "missing_order_type") {
-                textReply = "Vai ser entrega ou retirada?";
-                voiceReply = "Vai ser entrega ou retirada?";
+                textReply = "Vai ser entrega ou retirada? Ou diga *REVISAR* pra gente registrar e conferir depois.";
+                voiceReply = "Vai ser entrega ou retirada? Ou fale revisar pra gente registrar e conferir depois.";
               } else if (blocked === "missing_address") {
-                textReply = "Perfeito. Me passa seu endereço completo, por favor (rua, número, bairro e complemento).";
-                voiceReply = "Perfeito. Me passa seu endereço completo, por favor. Rua, número, bairro e complemento.";
+                textReply = "Perfeito. Me passa seu endereço completo, por favor (rua, número, bairro). Ou diga *REVISAR* pra gente registrar e conferir depois.";
+                voiceReply = "Perfeito. Me passa seu endereço completo. Ou fale revisar pra gente registrar e conferir depois.";
               } else if (blocked === "missing_payment") {
-                textReply = "Como você prefere pagar: Pix, cartão ou dinheiro?";
-                voiceReply = "Como você prefere pagar: Pix, cartão ou dinheiro?";
+                textReply = "Como você prefere pagar: Pix, cartão ou dinheiro? Ou diga *REVISAR* pra gente registrar e conferir depois.";
+                voiceReply = "Como você prefere pagar: Pix, cartão ou dinheiro? Ou fale revisar pra gente registrar e conferir depois.";
+              } else if (blocked === "sent_to_review") {
+                // Já tratado acima
               } else {
-                textReply = "Tive um probleminha pra confirmar seu pedido agora. Pode tentar de novo?";
-                voiceReply = "Tive um probleminha pra confirmar seu pedido agora. Pode tentar de novo?";
+                textReply = "Tive um probleminha pra confirmar seu pedido agora. Pode tentar de novo ou dizer *REVISAR*?";
+                voiceReply = "Tive um probleminha pra confirmar seu pedido agora. Pode tentar de novo ou dizer revisar?";
               }
             }
+          }
+
+          // Trata ação de request_review
+          if (parsed.action === "request_review" && actionResult.orderNumber) {
+            textReply = `📋 Seu pedido foi registrado como #${actionResult.orderNumber} e está *EM REVISÃO*. Um atendente vai conferir e entrar em contato!`;
+            voiceReply = `Seu pedido foi registrado com número ${actionResult.orderNumber} e está em revisão. Um atendente vai conferir e entrar em contato!`;
           }
         }
 
         // Guardrail: nunca afirmar "pedido confirmado" sem ter executado confirm_order.
         // Isso evita que o cliente ouça uma confirmação que não virou pedido no sistema.
         const saidConfirmed = /pedido\s+(?:ja\s+)?confirmad[oa]/i.test(textReply);
-        if (saidConfirmed && parsed.action !== "confirm_order") {
-          textReply = "Pra eu confirmar no sistema, me diga só: CONFIRMAR. Se preferir, me fale também seu nome.";
-          voiceReply = "Pra eu confirmar no sistema, me diga só: confirmar. E se puder, me fala seu nome também.";
+        if (saidConfirmed && parsed.action !== "confirm_order" && !parsed.action?.includes("review")) {
+          textReply = "Pra eu confirmar no sistema, me diga só: CONFIRMAR. Ou diga *REVISAR* para registrar e conferirmos depois.";
+          voiceReply = "Pra eu confirmar no sistema, me diga só: confirmar. Ou fale revisar para registrar e conferirmos depois.";
         }
         
         // Adiciona resposta ao histórico
@@ -1006,6 +1029,7 @@ async function processAIAction(
   let newContext = { ...context };
   let orderNumber: number | undefined;
   let confirmOrderBlocked: ConfirmOrderBlockReason | undefined;
+  let sentToReview = false;
   
   console.log(`[AI Action] ${action}:`, JSON.stringify(actionData));
   
@@ -1090,7 +1114,7 @@ async function processAIAction(
       
     case "confirm_order":
       // Valida que temos dados suficientes para criar o pedido
-      console.log(`[AI Action] confirm_order - Carrinho: ${newContext.cart.length} itens, Nome: ${newContext.customerName}, Tipo: ${newContext.orderType}, Pagamento: ${newContext.paymentMethod}`);
+      console.log(`[AI Action] confirm_order - Carrinho: ${newContext.cart.length} itens, Nome: ${newContext.customerName}, Tipo: ${newContext.orderType}, Pagamento: ${newContext.paymentMethod}, Tentativas: ${newContext.confirmAttempts || 0}`);
       
       // Se action_data tiver itens, adiciona ao carrinho primeiro
       if (actionData.items && Array.isArray(actionData.items) && actionData.items.length > 0) {
@@ -1148,39 +1172,53 @@ async function processAIAction(
         newContext.paymentMethod = paymentMap[key] || paymentMap[String(actionData.payment)] || actionData.payment;
       }
       
-      // Valida se temos tudo necessário
-      if (newContext.cart.length === 0) {
-        console.error("[AI Action] ERRO: Tentativa de confirmar pedido com carrinho vazio!");
-        confirmOrderBlocked = "missing_items";
+      // Verifica dados faltantes
+      const hasMissingData = 
+        newContext.cart.length === 0 ||
+        !isValidCustomerName(newContext.customerName) ||
+        !newContext.orderType ||
+        (newContext.orderType === "DELIVERY" && !newContext.deliveryAddress) ||
+        !newContext.paymentMethod;
+      
+      // Se tem dados faltantes, incrementa contador de tentativas
+      if (hasMissingData) {
+        newContext.confirmAttempts = (newContext.confirmAttempts || 0) + 1;
+        console.log(`[AI Action] Dados faltantes, tentativa ${newContext.confirmAttempts}`);
+        
+        // AUTO-REVISÃO: Se já tentou 2+ vezes E tem pelo menos itens no carrinho, registra como revisão
+        if (newContext.confirmAttempts >= 2 && newContext.cart.length > 0) {
+          console.log("[AI Action] Auto-revisão ativada: registrando pedido incompleto para revisão");
+          orderNumber = (await createOrder(supabase, newContext, phone, inputType, true)) ?? undefined;
+          if (orderNumber) {
+            sentToReview = true;
+            confirmOrderBlocked = "sent_to_review";
+            console.log(`[AI Action] Pedido #${orderNumber} criado como REVISÃO`);
+            // Limpa contexto
+            newContext = { 
+              cart: [],
+              conversationHistory: newContext.conversationHistory 
+            };
+          }
+          break;
+        }
+        
+        // Ainda não atingiu limite, retorna o erro específico
+        if (newContext.cart.length === 0) {
+          confirmOrderBlocked = "missing_items";
+        } else if (!isValidCustomerName(newContext.customerName)) {
+          confirmOrderBlocked = "missing_name";
+        } else if (!newContext.orderType) {
+          confirmOrderBlocked = "missing_order_type";
+        } else if (newContext.orderType === "DELIVERY" && !newContext.deliveryAddress) {
+          confirmOrderBlocked = "missing_address";
+        } else if (!newContext.paymentMethod) {
+          confirmOrderBlocked = "missing_payment";
+        }
         break;
       }
       
-      if (!isValidCustomerName(newContext.customerName)) {
-        console.error("[AI Action] ERRO: Tentativa de confirmar pedido sem nome do cliente!");
-        confirmOrderBlocked = "missing_name";
-        break;
-      }
-      
-      if (!newContext.orderType) {
-        console.error("[AI Action] ERRO: Tentativa de confirmar pedido sem tipo (entrega/retirada)!");
-        confirmOrderBlocked = "missing_order_type";
-        break;
-      }
-
-      if (newContext.orderType === "DELIVERY" && !newContext.deliveryAddress) {
-        console.error("[AI Action] ERRO: Tentativa de confirmar delivery sem endereço!");
-        confirmOrderBlocked = "missing_address";
-        break;
-      }
-      
-      if (!newContext.paymentMethod) {
-        console.error("[AI Action] ERRO: Tentativa de confirmar pedido sem forma de pagamento!");
-        confirmOrderBlocked = "missing_payment";
-        break;
-      }
-      
-      // Cria o pedido no banco
-      orderNumber = (await createOrder(supabase, newContext, phone, inputType)) ?? undefined;
+      // Cria o pedido no banco (todos os dados OK)
+      orderNumber = (await createOrder(supabase, newContext, phone, inputType, false)) ?? undefined;
       if (orderNumber) {
         console.log(`[AI Action] Pedido criado com sucesso: #${orderNumber}`);
         console.log(`[AI Action] Itens: ${newContext.cart.map(i => `${i.quantity}x ${i.productName}`).join(", ")}`);
@@ -1196,13 +1234,31 @@ async function processAIAction(
         confirmOrderBlocked = "create_failed";
       }
       break;
+    
+    // NOVA AÇÃO: Solicitar revisão manualmente
+    case "request_review":
+      if (newContext.cart.length > 0) {
+        console.log("[AI Action] Cliente solicitou revisão manualmente");
+        orderNumber = (await createOrder(supabase, newContext, phone, inputType, true, "Solicitado pelo cliente")) ?? undefined;
+        if (orderNumber) {
+          sentToReview = true;
+          console.log(`[AI Action] Pedido #${orderNumber} criado como REVISÃO (solicitado)`);
+          newContext = { 
+            cart: [],
+            conversationHistory: newContext.conversationHistory 
+          };
+        }
+      } else {
+        confirmOrderBlocked = "missing_items";
+      }
+      break;
       
     case "check_status":
       // Status será buscado e retornado pela IA
       break;
   }
 
-  return { newContext, orderNumber, confirmOrderBlocked };
+  return { newContext, orderNumber, confirmOrderBlocked, sentToReview };
 }
 
 // Formata preço
@@ -1354,25 +1410,43 @@ async function createOrder(
   supabase: ReturnType<typeof getSupabase>,
   context: ConversationContext,
   phone: string,
-  inputType: "text" | "audio" = "text"
+  inputType: "text" | "audio" = "text",
+  isReview: boolean = false, // Flag para marcar como EM REVISÃO
+  reviewNotes?: string // Notas adicionais sobre o que falta
 ): Promise<number | null> {
   const subtotal = context.cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
   const deliveryFee = context.orderType === "DELIVERY" ? 5 : 0;
   const total = subtotal + deliveryFee;
 
+  // Monta as notas do pedido
+  let orderNotes = "";
+  if (isReview) {
+    const missingFields: string[] = [];
+    if (!context.customerName) missingFields.push("NOME");
+    if (!context.orderType) missingFields.push("TIPO (entrega/retirada)");
+    if (context.orderType === "DELIVERY" && !context.deliveryAddress) missingFields.push("ENDEREÇO");
+    if (!context.paymentMethod) missingFields.push("PAGAMENTO");
+    
+    orderNotes = `⚠️ EM REVISÃO - Dados faltantes: ${missingFields.length > 0 ? missingFields.join(", ") : "verificar com cliente"}`;
+    if (reviewNotes) {
+      orderNotes += ` | ${reviewNotes}`;
+    }
+  }
+
   const { data: order, error } = await supabase
     .from("orders")
     .insert({
       channel: "WHATSAPP",
-      order_type: context.orderType,
-      customer_name: context.customerName,
+      order_type: context.orderType || "PRESENCIAL", // Default para presencial se não definido
+      customer_name: context.customerName || "PENDENTE - REVISÃO",
       customer_phone: phone,
       delivery_address: context.deliveryAddress,
       payment_method: context.paymentMethod,
       subtotal,
       delivery_fee: deliveryFee,
       total,
-      input_type: inputType, // Salva o tipo de input para notificações
+      input_type: inputType,
+      notes: orderNotes || null,
     })
     .select("order_number")
     .single();
@@ -1401,6 +1475,7 @@ async function createOrder(
     await supabase.from("order_items").insert(items);
   }
 
+  console.log(`[createOrder] Pedido #${order.order_number} criado ${isReview ? "(EM REVISÃO)" : ""}`);
   return order.order_number;
 }
 
