@@ -55,13 +55,21 @@ async function sendWhatsAppMessage(phone: string, message: string) {
   const evolutionKey = Deno.env.get("EVOLUTION_API_KEY");
   const instanceName = Deno.env.get("EVOLUTION_INSTANCE_NAME");
 
+  console.log("Enviando mensagem para:", phone);
+  console.log("Evolution URL:", evolutionUrl ? "configurada" : "NÃO configurada");
+  console.log("Evolution Key:", evolutionKey ? "configurada" : "NÃO configurada");
+  console.log("Instance Name:", instanceName || "NÃO configurada");
+
   if (!evolutionUrl || !evolutionKey || !instanceName) {
-    console.error("Evolution API não configurada");
+    console.error("Evolution API não configurada - faltam variáveis de ambiente");
     return;
   }
 
+  const url = `${evolutionUrl}/message/sendText/${instanceName}`;
+  console.log("URL de envio:", url);
+
   try {
-    await fetch(`${evolutionUrl}/message/sendText/${instanceName}`, {
+    const response = await fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -72,6 +80,13 @@ async function sendWhatsAppMessage(phone: string, message: string) {
         text: message,
       }),
     });
+
+    const responseText = await response.text();
+    console.log("Resposta Evolution API:", response.status, responseText);
+
+    if (!response.ok) {
+      console.error("Erro Evolution API:", response.status, responseText);
+    }
   } catch (error) {
     console.error("Erro ao enviar mensagem:", error);
   }
