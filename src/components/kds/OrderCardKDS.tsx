@@ -143,6 +143,23 @@ export function OrderCardKDS({ order }: OrderCardKDSProps) {
             <div className="flex items-center gap-2">
               <Phone className="h-4 w-4 text-muted-foreground" />
               <span>{order.customer_phone}</span>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-6 w-6 text-[#25D366] hover:text-[#128C7E] hover:bg-[#25D366]/10"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  const phone = order.customer_phone?.replace(/\D/g, '');
+                  const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+                  const url = isMobile 
+                    ? `whatsapp://send?phone=${phone}` 
+                    : `https://web.whatsapp.com/send?phone=${phone}`;
+                  window.open(url, '_blank');
+                }}
+                title="Abrir conversa no WhatsApp"
+              >
+                <MessageCircle className="h-4 w-4" fill="currentColor" />
+              </Button>
             </div>
           )}
           {order.delivery_address && (
