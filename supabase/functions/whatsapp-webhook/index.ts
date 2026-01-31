@@ -341,8 +341,8 @@ async function generateTTSAudio(text: string): Promise<ArrayBuffer | null> {
     return null;
   }
 
-  // Voice ID: Sarah (feminina, natural) - pode trocar por outra voz
-  const voiceId = "EXAVITQu4vr4xnSDxMaL";
+  // Voice ID: Ana Alice - Amigável e Clara (português brasileiro)
+  const voiceId = "ORgG8rwdAiMYRug8RJwR";
 
   try {
     const response = await fetch(
