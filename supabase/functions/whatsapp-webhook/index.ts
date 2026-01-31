@@ -772,7 +772,7 @@ SE O CLIENTE PEDIR ALGO QUE NÃO EXISTE:
 RESPONDA COM JSON NO FORMATO:
 {
   "text_reply": "Resposta em texto para o cliente (NUNCA diga que o pedido foi confirmado)",
-  "voice_reply_script": "Texto natural para ser narrado (se input for áudio)",
+  "voice_reply_script": "Texto natural para ser narrado (se input for áudio). MESMA REGRA: NUNCA diga que confirmou/registrou sem o número do pedido retornado pelo sistema.",
   "action": "none|add_to_cart|remove_from_cart|set_delivery|set_pickup|set_address|set_payment|set_name|set_change|confirm_order|request_review|check_status",
   "action_data": {
     "items": [{"name": "Nome Exato do Produto", "quantity": 1}],
@@ -820,6 +820,50 @@ function isValidCustomerName(name: unknown): name is string {
     "nao sei",
   ];
   return !invalid.includes(cleaned);
+}
+
+function getConfirmOrderBlockReason(context: ConversationContext): ConfirmOrderBlockReason | null {
+  if (!context?.cart || context.cart.length === 0) return "missing_items";
+  if (!isValidCustomerName(context.customerName)) return "missing_name";
+  if (!context.orderType) return "missing_order_type";
+  if (context.orderType === "DELIVERY" && !context.deliveryAddress) return "missing_address";
+  if (!context.paymentMethod) return "missing_payment";
+  return null;
+}
+
+function getMissingDataQuestion(reason: ConfirmOrderBlockReason): { text: string; voice: string } {
+  switch (reason) {
+    case "missing_items":
+      return {
+        text: "Antes de confirmar, me diz quais itens você quer no pedido (ex.: 1 X-Tudo e 1 Coca-Cola Lata).",
+        voice: "Antes de confirmar, me diz quais itens você quer no pedido. Por exemplo: um X-Tudo e uma Coca-Cola lata.",
+      };
+    case "missing_name":
+      return {
+        text: "Show! Pra confirmar, me diz seu nome.",
+        voice: "Show! Pra eu confirmar o pedido, me diz seu nome.",
+      };
+    case "missing_order_type":
+      return {
+        text: "Vai ser entrega ou retirada?",
+        voice: "Vai ser entrega ou retirada?",
+      };
+    case "missing_address":
+      return {
+        text: "Perfeito. Me passa seu endereço completo, por favor (rua, número, bairro).",
+        voice: "Perfeito. Me passa seu endereço completo, por favor. Rua, número e bairro.",
+      };
+    case "missing_payment":
+      return {
+        text: "Como você prefere pagar: Pix, cartão ou dinheiro?",
+        voice: "Como você prefere pagar: Pix, cartão ou dinheiro?",
+      };
+    default:
+      return {
+        text: "Só um instante — preciso de mais uma informação pra registrar seu pedido.",
+        voice: "Só um instante. Eu preciso de mais uma informação pra registrar seu pedido.",
+      };
+  }
 }
 
 // Processa mensagem com IA (DeepSeek)
@@ -930,6 +974,8 @@ async function processWithAI(
         let textReply: string = parsed.text_reply || "Como posso ajudar?";
         let voiceReply: string = parsed.voice_reply_script || textReply;
 
+        const missingBefore = getConfirmOrderBlockReason(newContext);
+
         // Variáveis para rastrear resultado de ações
         let actionOrderNumber: number | undefined;
         let actionSentToReview = false;
@@ -993,6 +1039,54 @@ async function processWithAI(
           }
         }
 
+        const missingAfter = getConfirmOrderBlockReason(newContext);
+
+        // AUTO-CONFIRMAÇÃO: se o cliente acabou de fornecer o último dado necessário,
+        // garante que o pedido seja realmente criado no banco antes de falar "confirmado".
+        if (!actionOrderNumber && !actionSentToReview && !missingAfter) {
+          const userWantsFinalize = /\b(confirmar|confirmo|finalizar|finalizo|fechar|fecha|pode\s+confirmar|pode\s+fechar|isso\s+mesmo)\b/i.test(message);
+          const actionLikelyLastStep =
+            ["set_name", "set_payment", "set_address", "set_delivery", "set_pickup", "set_change"].includes(parsed.action || "");
+
+          if (userWantsFinalize || (missingBefore && actionLikelyLastStep)) {
+            const autoConfirm = await processAIAction(
+              supabase,
+              phone,
+              "confirm_order",
+              {
+                items: newContext.cart?.map((i) => ({ name: i.productName, quantity: i.quantity })) || [],
+                name: newContext.customerName,
+                delivery_type: newContext.orderType,
+                address: newContext.deliveryAddress,
+                payment: newContext.paymentMethod,
+                change_for: newContext.changeFor,
+              },
+              newContext,
+              products,
+              inputType
+            );
+
+            newContext = autoConfirm.newContext;
+            actionOrderNumber = autoConfirm.orderNumber;
+            actionSentToReview = autoConfirm.sentToReview || false;
+
+            if (actionSentToReview && actionOrderNumber) {
+              textReply = `📋 Seu pedido foi registrado como #${actionOrderNumber} e está *EM REVISÃO*. Um atendente vai conferir e entrar em contato se precisar de mais informações!`;
+              voiceReply = `Seu pedido foi registrado com número ${actionOrderNumber} e está em revisão. Um atendente vai conferir e entrar em contato se precisar de mais informações!`;
+            } else if (actionOrderNumber) {
+              textReply = `✅ Pedido confirmado! Número #${actionOrderNumber}. Vou te atualizando por aqui.`;
+              voiceReply = `Perfeito! Seu pedido ficou confirmado. Número ${actionOrderNumber}. Vou te atualizando por aqui.`;
+            } else if (autoConfirm.confirmOrderBlocked) {
+              const q = getMissingDataQuestion(autoConfirm.confirmOrderBlocked);
+              textReply = q.text;
+              voiceReply = q.voice;
+            } else {
+              textReply = "Tive um probleminha pra registrar seu pedido agora. Pode tentar de novo?";
+              voiceReply = "Tive um probleminha pra registrar seu pedido agora. Pode tentar de novo?";
+            }
+          }
+        }
+
         // Guardrail FORTE: nunca afirmar "pedido confirmado" sem ter executado confirm_order com sucesso.
         // Isso evita que o cliente ouça uma confirmação que não virou pedido no sistema.
         const confirmPatterns = [
@@ -1004,17 +1098,30 @@ async function processWithAI(
           /pronto[\!,\.]?\s*seu\s+pedido/i,
           /pedido\s+(?:n[úu]mero\s+)?#?\d+\s+confirmad/i,
         ];
-        const saidConfirmed = confirmPatterns.some(pattern => pattern.test(textReply));
+        const customerVisibleReply = inputType === "audio" ? voiceReply : textReply;
+        const saidConfirmed = confirmPatterns.some(
+          (pattern) =>
+            pattern.test(textReply) ||
+            pattern.test(voiceReply) ||
+            pattern.test(customerVisibleReply)
+        );
         
-        // Só permite confirmação se foi uma ação de confirm_order bem sucedida (com orderNumber)
-        const wasRealConfirmation = parsed.action === "confirm_order" && actionOrderNumber;
-        const wasReviewConfirmation = (parsed.action === "request_review" || parsed.action === "confirm_order") && actionSentToReview;
+        // Só permite confirmação se EXISTE orderNumber criado no banco
+        const wasRealConfirmation = Boolean(actionOrderNumber) && !actionSentToReview;
+        const wasReviewConfirmation = Boolean(actionOrderNumber) && actionSentToReview;
         
         if (saidConfirmed && !wasRealConfirmation && !wasReviewConfirmation) {
           // A IA disse que confirmou mas não confirmou de verdade - corrige a resposta
           console.log("[Guardrail] IA disse confirmado sem criar pedido real. Corrigindo resposta.");
-          textReply = "Pra eu confirmar no sistema, me diga só: CONFIRMAR. Ou diga *REVISAR* para registrar e conferirmos depois.";
-          voiceReply = "Pra eu confirmar no sistema, me diga só: confirmar. Ou fale revisar para registrar e conferirmos depois.";
+          const missingNow = getConfirmOrderBlockReason(newContext);
+          if (missingNow) {
+            const q = getMissingDataQuestion(missingNow);
+            textReply = q.text;
+            voiceReply = q.voice;
+          } else {
+            textReply = "Ainda não consegui registrar seu pedido no sistema. Pode falar 'finalizar' de novo?";
+            voiceReply = "Ainda não consegui registrar seu pedido no sistema. Pode falar finalizar de novo?";
+          }
         }
         
         // Adiciona resposta ao histórico
