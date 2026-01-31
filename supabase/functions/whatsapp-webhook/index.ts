@@ -62,6 +62,138 @@ function detectIntent(text: string): { intent: string; confidence: number } {
   return { intent: "unknown", confidence: 0 };
 }
 
+function normalizeText(input: string): string {
+  return input
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function isLikelyMoreItemsQuestion(text: string | undefined | null): boolean {
+  if (!text) return false;
+  const t = normalizeText(text);
+  return /\b(mais\s+alguma\s+coisa|mais\s+alguma|algo\s+mais|quer\s+mais|deseja\s+mais)\b/.test(t);
+}
+
+function inferCartItemsFromMessage(
+  message: string,
+  products: Product[]
+): Array<{ product: Product; quantity: number }> {
+  const msg = normalizeText(message);
+  if (!msg || msg.length < 3) return [];
+
+  // Evita inferência em mensagens que claramente são checkout/controle
+  if (/\b(pix|cartao|cartao|dinheiro|troco|entrega|delivery|retirada|buscar|endereco|rua|avenida|av|bairro)\b/.test(msg)) {
+    return [];
+  }
+
+  const matches: Array<{ product: Product; quantity: number; score: number }> = [];
+
+  for (const p of products) {
+    const pn = normalizeText(p.name);
+    if (!pn) continue;
+
+    const directHit = msg.includes(pn);
+    const reverseHit = pn.includes(msg) && msg.length >= 4;
+    if (!directHit && !reverseHit) continue;
+
+    // Tenta inferir quantidade (ex.: "2 x-tudo")
+    const firstWord = pn.split(" ")[0];
+    const qtyRe = new RegExp(`\\b(\\d+)\\s*(?:x\\s*)?(?:${escapeRegExp(firstWord)})\\b`);
+    const qtyMatch = msg.match(qtyRe);
+    const qty = qtyMatch ? Math.max(1, Number(qtyMatch[1])) : 1;
+
+    matches.push({ product: p, quantity: qty, score: pn.length });
+  }
+
+  // Preferir matches mais específicos
+  matches.sort((a, b) => b.score - a.score);
+
+  const seen = new Set<string>();
+  const result: Array<{ product: Product; quantity: number }> = [];
+  for (const m of matches) {
+    if (seen.has(m.product.id)) continue;
+    seen.add(m.product.id);
+    result.push({ product: m.product, quantity: m.quantity });
+    if (result.length >= 4) break; // evita excesso
+  }
+
+  return result;
+}
+
+function mergeItemsIntoCart(
+  context: ConversationContext,
+  items: Array<{ product: Product; quantity: number }>
+): boolean {
+  if (!items.length) return false;
+  if (!context.cart) context.cart = [];
+
+  let changed = false;
+  for (const { product, quantity } of items) {
+    const existing = context.cart.find((c) => c.productId === product.id);
+    if (existing) {
+      existing.quantity += quantity;
+      changed = true;
+    } else {
+      context.cart.push({
+        productId: product.id,
+        productName: product.name,
+        quantity,
+        price: product.price,
+      });
+      changed = true;
+    }
+  }
+
+  return changed;
+}
+
+function applyDeterministicCheckoutExtraction(message: string, context: ConversationContext) {
+  const raw = message.trim();
+  const msg = normalizeText(raw);
+  if (!msg) return;
+
+  // Nome
+  if (!isValidCustomerName(context.customerName) && isValidCustomerName(raw)) {
+    context.customerName = raw.trim();
+  }
+
+  // Tipo (entrega/retirada)
+  if (!context.orderType) {
+    if (/\b(entrega|delivery)\b/.test(msg)) context.orderType = "DELIVERY";
+    if (/\b(retirada|retirar|buscar|busca|presencial)\b/.test(msg)) context.orderType = "PRESENCIAL";
+  }
+
+  // Pagamento
+  if (!context.paymentMethod) {
+    if (/\bpix\b/.test(msg)) context.paymentMethod = "PIX";
+    else if (/\b(cartao|cartao|credito|debito)\b/.test(msg)) context.paymentMethod = "CARTAO";
+    else if (/\b(dinheiro|cash)\b/.test(msg)) context.paymentMethod = "DINHEIRO";
+  }
+
+  // Endereço (somente se for entrega e a mensagem parece endereço)
+  if (context.orderType === "DELIVERY" && !context.deliveryAddress) {
+    const looksLikeAddress = raw.length >= 10 && /\b(rua|r\b|avenida|av\b|travessa|alameda|praca|praça|estrada|rodovia|bairro|numero|n\b)\b/.test(msg);
+    if (looksLikeAddress) context.deliveryAddress = raw;
+  }
+
+  // Troco (dinheiro)
+  if (context.paymentMethod === "DINHEIRO" && !context.changeFor) {
+    const m = msg.match(/\b(troco)\s*(?:para|p\/|pra)?\s*(\d+(?:[\.,]\d+)?)\b/);
+    if (m?.[2]) {
+      const v = Number(m[2].replace(",", "."));
+      if (Number.isFinite(v) && v > 0) context.changeFor = v;
+    }
+  }
+}
+
 interface ConversationContext {
   cart: Array<{ productId: string; productName: string; quantity: number; price: number }>;
   selectedCategory?: string;
@@ -888,6 +1020,19 @@ async function processWithAI(
   if (!newContext.conversationHistory) {
     newContext.conversationHistory = [];
   }
+
+  const lastAssistantBefore = [...newContext.conversationHistory]
+    .reverse()
+    .find((m) => m.role === "assistant")?.content;
+
+  // Heurística importante: se o cliente respondeu "não" após "mais alguma coisa?",
+  // isso significa "não quero mais itens" -> seguir para finalizar, e NÃO pedir itens novamente.
+  const userIntent = detectIntent(message).intent;
+  const denyMeansFinish =
+    userIntent === "deny" &&
+    Array.isArray(newContext.cart) &&
+    newContext.cart.length > 0 &&
+    isLikelyMoreItemsQuestion(lastAssistantBefore);
   
   // Adiciona mensagem do usuário ao histórico
   newContext.conversationHistory.push({
@@ -911,6 +1056,16 @@ async function processWithAI(
       content: msg.content
     }))
   ];
+
+  if (denyMeansFinish) {
+    aiMessages.push({
+      role: "system",
+      content:
+        'NOTA DO SISTEMA: O cliente respondeu "NÃO" para "mais alguma coisa?". Interprete isso como intenção de FINALIZAR o pedido (seguir para coleta de dados de checkout), e NÃO como carrinho vazio.'
+    });
+  }
+
+  const inferredUserItems = inferCartItemsFromMessage(message, products);
   
   // Usa OpenRouter/DeepSeek se disponível, senão Lovable AI
   const apiUrl = OPENROUTER_API_KEY 
@@ -976,6 +1131,8 @@ async function processWithAI(
 
         const missingBefore = getConfirmOrderBlockReason(newContext);
 
+        const cartLenBeforeActions = newContext.cart?.length || 0;
+
         // Variáveis para rastrear resultado de ações
         let actionOrderNumber: number | undefined;
         let actionSentToReview = false;
@@ -1036,6 +1193,20 @@ async function processWithAI(
           if (parsed.action === "request_review" && actionResult.orderNumber) {
             textReply = `📋 Seu pedido foi registrado como #${actionResult.orderNumber} e está *EM REVISÃO*. Um atendente vai conferir e entrar em contato!`;
             voiceReply = `Seu pedido foi registrado com número ${actionResult.orderNumber} e está em revisão. Um atendente vai conferir e entrar em contato!`;
+          }
+        }
+
+        // Se a IA NÃO chamou add_to_cart, mas o usuário claramente digitou um item (ex.: "X-Tudo"),
+        // inferimos e adicionamos para evitar o loop de "me diz quais itens".
+        if (
+          inferredUserItems.length > 0 &&
+          parsed.action !== "add_to_cart" &&
+          parsed.action !== "confirm_order" &&
+          (newContext.cart?.length || 0) === cartLenBeforeActions
+        ) {
+          const changed = mergeItemsIntoCart(newContext, inferredUserItems);
+          if (changed) {
+            console.log("[Heurística] Itens inferidos e adicionados ao carrinho a partir da mensagem do cliente.");
           }
         }
 
@@ -1141,19 +1312,83 @@ async function processWithAI(
         console.error("Erro ao parsear JSON da IA:", parseError);
       }
     }
-    
-    // Se não conseguiu parsear JSON, usa a resposta como texto
-    const fallbackReply = content.replace(/```json[\s\S]*?```/g, "").trim() || "Como posso ajudar?";
-    
+
+    // Fallback: IA não devolveu JSON confiável.
+    // Regra de segurança: nunca deixar sair "pedido confirmado" sem criar pedido no banco.
+    const fallbackRaw = content.replace(/```json[\s\S]*?```/g, "").trim() || "";
+    const fallbackConfirmPatterns = [
+      /pedido\s+(?:ja\s+|foi\s+)?confirmad[oa]/i,
+      /pedido\s+(?:ja\s+|foi\s+)?criad[oa]/i,
+      /pedido\s+(?:ja\s+|foi\s+)?registrad[oa]/i,
+      /anotei\s+(?:o\s+)?seu\s+pedido/i,
+      /seu\s+pedido\s+(?:ja\s+)?(?:foi|esta|está)\s+(?:confirm|anot|registr)/i,
+    ];
+    const saidConfirmed = fallbackConfirmPatterns.some((p) => p.test(fallbackRaw));
+
+    // Tenta extrair dados básicos do próprio texto do cliente (nome/pagamento/tipo/endereço)
+    const missingBeforeFallback = getConfirmOrderBlockReason(newContext);
+    applyDeterministicCheckoutExtraction(message, newContext);
+
+    // Também tenta inferir itens a partir da mensagem do cliente se estiver faltando itens
+    if ((missingBeforeFallback === "missing_items" || (newContext.cart?.length || 0) === 0) && inferredUserItems.length > 0) {
+      mergeItemsIntoCart(newContext, inferredUserItems);
+    }
+
+    const missingAfterFallback = getConfirmOrderBlockReason(newContext);
+
+    const userWantsFinalizeFallback =
+      denyMeansFinish ||
+      /\b(confirmar|confirmo|finalizar|finalizo|fechar|fecha|pode\s+confirmar|pode\s+fechar|isso\s+mesmo)\b/i.test(message);
+    const completedNow = Boolean(missingBeforeFallback) && !missingAfterFallback;
+
+    let safeReply = fallbackRaw || "Como posso ajudar?";
+
+    // Se completou o último dado agora OU a IA tentou confirmar sem JSON, tenta confirmar de verdade.
+    if (!missingAfterFallback && (completedNow || userWantsFinalizeFallback || saidConfirmed)) {
+      const autoConfirm = await processAIAction(
+        supabase,
+        phone,
+        "confirm_order",
+        {
+          items: newContext.cart?.map((i) => ({ name: i.productName, quantity: i.quantity })) || [],
+          name: newContext.customerName,
+          delivery_type: newContext.orderType,
+          address: newContext.deliveryAddress,
+          payment: newContext.paymentMethod,
+          change_for: newContext.changeFor,
+        },
+        newContext,
+        products,
+        inputType
+      );
+
+      newContext = autoConfirm.newContext;
+
+      if (autoConfirm.sentToReview && autoConfirm.orderNumber) {
+        safeReply = `📋 Seu pedido foi registrado como #${autoConfirm.orderNumber} e está *EM REVISÃO*. Um atendente vai conferir e entrar em contato se precisar de mais informações!`;
+      } else if (autoConfirm.orderNumber) {
+        safeReply = `✅ Pedido confirmado! Número #${autoConfirm.orderNumber}. Vou te atualizando por aqui.`;
+      } else if (autoConfirm.confirmOrderBlocked) {
+        const q = getMissingDataQuestion(autoConfirm.confirmOrderBlocked);
+        safeReply = q.text;
+      } else {
+        safeReply = "Ainda não consegui registrar seu pedido no sistema. Pode falar 'finalizar' de novo?";
+      }
+    } else if (saidConfirmed && missingAfterFallback) {
+      // IA disse "confirmado" mas falta dado -> não pode confirmar
+      const q = getMissingDataQuestion(missingAfterFallback);
+      safeReply = q.text;
+    }
+
     newContext.conversationHistory?.push({
       role: "assistant",
-      content: fallbackReply,
+      content: safeReply,
       inputType
     });
-    
+
     return {
-      textReply: fallbackReply,
-      voiceReply: inputType === "audio" ? fallbackReply : undefined,
+      textReply: safeReply,
+      voiceReply: inputType === "audio" ? safeReply : undefined,
       newContext,
       shouldSendVoice: inputType === "audio"
     };
