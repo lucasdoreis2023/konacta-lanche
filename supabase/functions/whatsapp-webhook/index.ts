@@ -904,7 +904,8 @@ async function processWithAI(
             parsed.action,
             parsed.action_data || {},
             newContext,
-            products
+            products,
+            inputType
           );
 
           newContext = actionResult.newContext;
@@ -999,7 +1000,8 @@ async function processAIAction(
   action: string,
   actionData: any,
   context: ConversationContext,
-  products: Product[]
+  products: Product[],
+  inputType: "text" | "audio" = "text"
 ): Promise<AIActionResult> {
   let newContext = { ...context };
   let orderNumber: number | undefined;
@@ -1178,7 +1180,7 @@ async function processAIAction(
       }
       
       // Cria o pedido no banco
-      orderNumber = (await createOrder(supabase, newContext, phone)) ?? undefined;
+      orderNumber = (await createOrder(supabase, newContext, phone, inputType)) ?? undefined;
       if (orderNumber) {
         console.log(`[AI Action] Pedido criado com sucesso: #${orderNumber}`);
         console.log(`[AI Action] Itens: ${newContext.cart.map(i => `${i.quantity}x ${i.productName}`).join(", ")}`);
@@ -1351,7 +1353,8 @@ function formatOrderStatus(status: string): { emoji: string; label: string; desc
 async function createOrder(
   supabase: ReturnType<typeof getSupabase>,
   context: ConversationContext,
-  phone: string
+  phone: string,
+  inputType: "text" | "audio" = "text"
 ): Promise<number | null> {
   const subtotal = context.cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
   const deliveryFee = context.orderType === "DELIVERY" ? 5 : 0;
@@ -1369,6 +1372,7 @@ async function createOrder(
       subtotal,
       delivery_fee: deliveryFee,
       total,
+      input_type: inputType, // Salva o tipo de input para notificações
     })
     .select("order_number")
     .single();

@@ -52,6 +52,7 @@ export function OrderCardKDS({ order }: OrderCardKDSProps) {
           customerName: order.customer_name,
           orderType: order.order_type,
           total: order.total,
+          inputType: order.input_type || 'text', // Envia o tipo de input para notificar no mesmo formato
         },
       });
 
