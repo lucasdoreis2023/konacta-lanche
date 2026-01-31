@@ -1,13 +1,16 @@
 import { useState, useEffect } from 'react';
 import { Navigate } from 'react-router-dom';
 import { useOrders } from '@/hooks/useOrders';
+import { useKDSNotifications } from '@/hooks/useKDSNotifications';
 import { OrderCardKDS } from '@/components/kds/OrderCardKDS';
+import { KDSNotificationSettings } from '@/components/kds/KDSNotificationSettings';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Skeleton } from '@/components/ui/skeleton';
 import { supabase } from '@/integrations/supabase/client';
 import { UtensilsCrossed, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { OrderStatus } from '@/types/database';
+import { cn } from '@/lib/utils';
 
 export default function KDS() {
   const [filter, setFilter] = useState<'active' | 'all'>('active');
@@ -37,6 +40,9 @@ export default function KDS() {
     filter === 'active' ? activeStatuses : undefined
   );
 
+  // Notification system
+  const { prefs, setPrefs, isFlashing, testSound } = useKDSNotifications(orders);
+
   if (isAdmin === null) {
     return (
       <div className="flex min-h-screen items-center justify-center">
@@ -50,7 +56,17 @@ export default function KDS() {
   }
 
   return (
-    <div className="min-h-screen bg-muted/50">
+    <div
+      className={cn(
+        'min-h-screen bg-muted/50 transition-colors duration-300',
+        isFlashing && 'bg-orange-100 dark:bg-orange-900/30'
+      )}
+    >
+      {/* Flash overlay for more visibility */}
+      {isFlashing && (
+        <div className="fixed inset-0 z-40 pointer-events-none animate-pulse bg-orange-500/20" />
+      )}
+
       <header className="sticky top-0 z-50 border-b bg-background">
         <div className="container mx-auto flex h-16 items-center justify-between px-4">
           <div className="flex items-center gap-2">
@@ -64,6 +80,11 @@ export default function KDS() {
                 <TabsTrigger value="all">Todos</TabsTrigger>
               </TabsList>
             </Tabs>
+            <KDSNotificationSettings
+              prefs={prefs}
+              setPrefs={setPrefs}
+              testSound={testSound}
+            />
             <Button variant="outline" size="icon" onClick={() => refetch()}>
               <RefreshCw className="h-4 w-4" />
             </Button>
