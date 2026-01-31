@@ -55,11 +55,6 @@ async function sendWhatsAppMessage(phone: string, message: string) {
   const evolutionKey = Deno.env.get("EVOLUTION_API_KEY");
   const instanceName = Deno.env.get("EVOLUTION_INSTANCE_NAME");
 
-  console.log("Enviando mensagem para:", phone);
-  console.log("Evolution URL raw:", evolutionUrl);
-  console.log("Evolution Key:", evolutionKey ? "configurada" : "NÃO configurada");
-  console.log("Instance Name:", instanceName || "NÃO configurada");
-
   if (!evolutionUrl || !evolutionKey || !instanceName) {
     console.error("Evolution API não configurada - faltam variáveis de ambiente");
     return;
@@ -69,7 +64,6 @@ async function sendWhatsAppMessage(phone: string, message: string) {
   evolutionUrl = evolutionUrl.replace(/\/manager\/?$/, "").replace(/\/$/, "");
   
   const url = `${evolutionUrl}/message/sendText/${instanceName}`;
-  console.log("URL de envio (limpa):", url);
 
   try {
     const response = await fetch(url, {
@@ -85,13 +79,73 @@ async function sendWhatsAppMessage(phone: string, message: string) {
     });
 
     const responseText = await response.text();
-    console.log("Resposta Evolution API:", response.status, responseText);
-
     if (!response.ok) {
       console.error("Erro Evolution API:", response.status, responseText);
     }
   } catch (error) {
     console.error("Erro ao enviar mensagem:", error);
+  }
+}
+
+// Envia mensagem com botões via Evolution API
+interface ButtonOption {
+  buttonId: string;
+  buttonText: { displayText: string };
+}
+
+async function sendWhatsAppButtons(
+  phone: string,
+  title: string,
+  description: string,
+  buttons: Array<{ id: string; text: string }>
+) {
+  let evolutionUrl = Deno.env.get("EVOLUTION_API_URL");
+  const evolutionKey = Deno.env.get("EVOLUTION_API_KEY");
+  const instanceName = Deno.env.get("EVOLUTION_INSTANCE_NAME");
+
+  if (!evolutionUrl || !evolutionKey || !instanceName) {
+    console.error("Evolution API não configurada");
+    // Fallback para mensagem de texto
+    const fallbackText = `${title}\n\n${description}\n\n${buttons.map((b, i) => `*${i + 1}* - ${b.text}`).join("\n")}`;
+    return sendWhatsAppMessage(phone, fallbackText);
+  }
+
+  evolutionUrl = evolutionUrl.replace(/\/manager\/?$/, "").replace(/\/$/, "");
+  const url = `${evolutionUrl}/message/sendButtons/${instanceName}`;
+
+  const buttonPayload: ButtonOption[] = buttons.map((b) => ({
+    buttonId: b.id,
+    buttonText: { displayText: b.text },
+  }));
+
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        apikey: evolutionKey,
+      },
+      body: JSON.stringify({
+        number: phone,
+        title: title,
+        description: description,
+        buttons: buttonPayload,
+      }),
+    });
+
+    const responseText = await response.text();
+    
+    if (!response.ok) {
+      console.error("Erro ao enviar botões, usando fallback:", response.status, responseText);
+      // Fallback para mensagem de texto simples
+      const fallbackText = `${title}\n\n${description}\n\n${buttons.map((b, i) => `*${i + 1}* - ${b.text}`).join("\n")}`;
+      return sendWhatsAppMessage(phone, fallbackText);
+    }
+  } catch (error) {
+    console.error("Erro ao enviar botões:", error);
+    // Fallback
+    const fallbackText = `${title}\n\n${description}\n\n${buttons.map((b, i) => `*${i + 1}* - ${b.text}`).join("\n")}`;
+    return sendWhatsAppMessage(phone, fallbackText);
   }
 }
 
@@ -370,6 +424,22 @@ async function processMessage(
     }
 
     case "CATEGORY": {
+      // Aceita finalizar direto do estado de categoria
+      if (["finalizar", "fechar", "concluir"].includes(msgLower)) {
+        if (newContext.cart.length === 0) {
+          return {
+            newState: "CATEGORY",
+            response: "🛒 Seu carrinho está vazio! Adicione produtos primeiro.\n\nDigite o *número* do produto desejado.",
+            newContext,
+          };
+        }
+        return {
+          newState: "CHECKOUT_NAME",
+          response: "👤 *DADOS DO PEDIDO*\n\nQual é o seu *nome*?",
+          newContext,
+        };
+      }
+
       if (msgLower === "voltar") {
         const categories = await getCategories(supabase);
         const categoryList = categories
@@ -378,6 +448,26 @@ async function processMessage(
         return {
           newState: "MENU",
           response: `📋 *CARDÁPIO*\n\nEscolha uma categoria:\n\n${categoryList}`,
+          newContext,
+        };
+      }
+
+      // Aceita ver carrinho
+      if (["carrinho", "ver carrinho"].includes(msgLower)) {
+        if (newContext.cart.length === 0) {
+          return {
+            newState: "CATEGORY",
+            response: "🛒 Seu carrinho está vazio!\n\nDigite o *número* do produto para adicionar.",
+            newContext,
+          };
+        }
+        const cartList = newContext.cart
+          .map((item, i) => `${i + 1}. ${item.quantity}x ${item.productName} - ${formatPrice(item.price * item.quantity)}`)
+          .join("\n");
+        const total = newContext.cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
+        return {
+          newState: "CART",
+          response: `🛒 *Seu Carrinho:*\n\n${cartList}\n\n💰 *Total: ${formatPrice(total)}*\n\nDigite:\n*FINALIZAR* - para fazer o pedido\n*LIMPAR* - para esvaziar o carrinho\n*CARDÁPIO* - para adicionar mais itens`,
           newContext,
         };
       }
@@ -410,9 +500,17 @@ async function processMessage(
         };
       }
 
+      // Mostra produtos novamente se não entendeu
+      const productList = products
+        .map(
+          (p, i) =>
+            `*${i + 1}* - ${p.name}\n   ${p.description || ""}\n   💰 ${formatPrice(p.price)}`
+        )
+        .join("\n\n");
+      
       return {
         newState: "CATEGORY",
-        response: "❌ Produto inválido. Digite o *número* do produto desejado.",
+        response: `Não entendi 😅\n\nDigite o *número* do produto:\n\n${productList}\n\nOu digite *VOLTAR* para ver outras categorias.`,
         newContext,
       };
     }
@@ -624,14 +722,36 @@ Deno.serve(async (req) => {
     const data = body.data;
 
     // Ignora eventos que não são mensagens recebidas
-    if (event !== "messages.upsert" || !data?.message?.conversation) {
+    if (event !== "messages.upsert") {
       return new Response(JSON.stringify({ status: "ignored" }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
+    // Extrai mensagem - suporta texto normal, texto estendido e resposta de botões
     const phone = data.key?.remoteJid?.replace("@s.whatsapp.net", "") || "";
-    const message = data.message?.conversation || data.message?.extendedTextMessage?.text || "";
+    let message = "";
+    
+    // Mensagem de texto normal
+    if (data.message?.conversation) {
+      message = data.message.conversation;
+    }
+    // Texto estendido (citação, etc)
+    else if (data.message?.extendedTextMessage?.text) {
+      message = data.message.extendedTextMessage.text;
+    }
+    // Resposta de botão
+    else if (data.message?.buttonsResponseMessage?.selectedButtonId) {
+      message = data.message.buttonsResponseMessage.selectedButtonId;
+    }
+    // Template button response
+    else if (data.message?.templateButtonReplyMessage?.selectedId) {
+      message = data.message.templateButtonReplyMessage.selectedId;
+    }
+    // Lista interativa
+    else if (data.message?.listResponseMessage?.singleSelectReply?.selectedRowId) {
+      message = data.message.listResponseMessage.singleSelectReply.selectedRowId;
+    }
 
     if (!phone || !message) {
       return new Response(JSON.stringify({ status: "no_message" }), {
