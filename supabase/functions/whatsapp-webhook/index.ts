@@ -268,6 +268,10 @@ interface ConversationContext {
   changeFor?: number;
   // Contador de tentativas de confirmação com dados faltantes (para auto-revisão)
   confirmAttempts?: number;
+  // Resumo da conversa para manter contexto sem usar muitos tokens
+  conversationSummary?: string;
+  // Timestamp do último resumo
+  lastSummaryAt?: string;
 }
 
 interface Category {
@@ -434,6 +438,303 @@ async function sendMultipleMessages(phone: string, messages: string[]): Promise<
     }
     await sendWhatsAppMessage(phone, messages[i], true);
   }
+}
+
+// ============ FUNÇÕES DE AGRUPAMENTO DE MENSAGENS ============
+
+// Configuração do agrupamento de mensagens
+const MESSAGE_GROUPING_DELAY_MS = 7000; // 7 segundos de espera antes de processar
+
+// Salva mensagem pendente para agrupamento
+async function savePendingMessage(
+  supabase: ReturnType<typeof getSupabase>,
+  phone: string,
+  messageContent: string,
+  messageId: string,
+  inputType: "text" | "audio"
+): Promise<void> {
+  await supabase.from("pending_messages").insert({
+    phone_number: phone,
+    message_content: messageContent,
+    message_id: messageId,
+    input_type: inputType,
+  });
+  console.log(`[MessageGrouping] Mensagem salva para agrupamento: "${messageContent.slice(0, 50)}..."`);
+}
+
+// Busca e agrupa mensagens pendentes
+async function getAndGroupPendingMessages(
+  supabase: ReturnType<typeof getSupabase>,
+  phone: string
+): Promise<{ messages: string[]; inputType: "text" | "audio"; messageIds: string[] } | null> {
+  const { data: pendingMessages, error } = await supabase
+    .from("pending_messages")
+    .select("*")
+    .eq("phone_number", phone)
+    .order("created_at", { ascending: true });
+  
+  if (error || !pendingMessages || pendingMessages.length === 0) {
+    return null;
+  }
+  
+  // Verifica se a última mensagem foi há mais de MESSAGE_GROUPING_DELAY_MS
+  const lastMessage = pendingMessages[pendingMessages.length - 1];
+  const lastMessageTime = new Date(lastMessage.created_at).getTime();
+  const now = Date.now();
+  const timeSinceLastMessage = now - lastMessageTime;
+  
+  if (timeSinceLastMessage < MESSAGE_GROUPING_DELAY_MS) {
+    console.log(`[MessageGrouping] Aguardando mais ${MESSAGE_GROUPING_DELAY_MS - timeSinceLastMessage}ms para agrupar`);
+    return null;
+  }
+  
+  // Agrupa as mensagens
+  const messages = pendingMessages.map(m => m.message_content);
+  const messageIds = pendingMessages.map(m => m.id);
+  // Determina o tipo de input predominante (se tiver áudio, considera áudio)
+  const hasAudio = pendingMessages.some(m => m.input_type === "audio");
+  
+  console.log(`[MessageGrouping] Agrupando ${messages.length} mensagens: ${messages.join(" | ").slice(0, 100)}...`);
+  
+  return {
+    messages,
+    inputType: hasAudio ? "audio" : "text",
+    messageIds
+  };
+}
+
+// Deleta mensagens pendentes após processamento
+async function deletePendingMessages(
+  supabase: ReturnType<typeof getSupabase>,
+  phone: string,
+  messageIds?: string[]
+): Promise<void> {
+  if (messageIds && messageIds.length > 0) {
+    await supabase.from("pending_messages").delete().in("id", messageIds);
+  } else {
+    await supabase.from("pending_messages").delete().eq("phone_number", phone);
+  }
+  console.log(`[MessageGrouping] Mensagens pendentes deletadas`);
+}
+
+// Verifica se há mensagens pendentes
+async function hasPendingMessages(
+  supabase: ReturnType<typeof getSupabase>,
+  phone: string
+): Promise<boolean> {
+  const { count } = await supabase
+    .from("pending_messages")
+    .select("id", { count: "exact", head: true })
+    .eq("phone_number", phone);
+  
+  return (count ?? 0) > 0;
+}
+
+// ============ FUNÇÕES DE DIVISÃO DE RESPOSTAS LONGAS ============
+
+// Configuração da divisão de mensagens
+const MAX_MESSAGE_LENGTH = 1000; // Máximo de caracteres por mensagem
+const SPLIT_PATTERNS = [
+  /\n\n+/, // Parágrafos duplos
+  /\n/, // Quebras de linha
+  /(?<=[.!?])\s+/, // Fim de frases
+  /(?<=[,;:])\s+/, // Vírgulas, ponto e vírgula
+];
+
+// Divide uma mensagem longa em partes menores
+function splitLongMessage(message: string): string[] {
+  if (message.length <= MAX_MESSAGE_LENGTH) {
+    return [message];
+  }
+  
+  const parts: string[] = [];
+  let remaining = message;
+  
+  while (remaining.length > MAX_MESSAGE_LENGTH) {
+    let splitIndex = MAX_MESSAGE_LENGTH;
+    
+    // Tenta encontrar um ponto de divisão natural
+    for (const pattern of SPLIT_PATTERNS) {
+      const substr = remaining.slice(0, MAX_MESSAGE_LENGTH);
+      const matches = [...substr.matchAll(new RegExp(pattern, 'g'))];
+      
+      if (matches.length > 0) {
+        // Pega a última ocorrência antes do limite
+        const lastMatch = matches[matches.length - 1];
+        if (lastMatch.index && lastMatch.index > MAX_MESSAGE_LENGTH / 2) {
+          splitIndex = lastMatch.index + lastMatch[0].length;
+          break;
+        }
+      }
+    }
+    
+    parts.push(remaining.slice(0, splitIndex).trim());
+    remaining = remaining.slice(splitIndex).trim();
+  }
+  
+  if (remaining.length > 0) {
+    parts.push(remaining);
+  }
+  
+  console.log(`[MessageSplit] Mensagem dividida em ${parts.length} partes`);
+  return parts;
+}
+
+// Envia resposta com divisão automática
+async function sendLongTextResponse(phone: string, message: string): Promise<void> {
+  const parts = splitLongMessage(message);
+  
+  for (let i = 0; i < parts.length; i++) {
+    if (i > 0) {
+      await delay(600 + Math.random() * 400);
+    }
+    await sendWhatsAppMessage(phone, parts[i], true);
+  }
+}
+
+// ============ FUNÇÕES DE RESUMO AUTOMÁTICO DE CONVERSA ============
+
+// Configuração do resumo
+const MESSAGES_BEFORE_SUMMARY = 10; // Quantidade de mensagens antes de criar resumo
+const SUMMARY_TTL_HOURS = 2; // Tempo de validade do resumo
+
+// Gera resumo da conversa usando IA
+async function generateConversationSummary(
+  conversationHistory: Array<{ role: string; content: string }>
+): Promise<string | null> {
+  const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY");
+  const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
+  
+  const apiUrl = OPENROUTER_API_KEY 
+    ? "https://openrouter.ai/api/v1/chat/completions"
+    : "https://ai.gateway.lovable.dev/v1/chat/completions";
+  
+  const apiKey = OPENROUTER_API_KEY || LOVABLE_API_KEY;
+  const model = OPENROUTER_API_KEY ? "deepseek/deepseek-chat" : "google/gemini-3-flash-preview";
+  
+  if (!apiKey) {
+    return null;
+  }
+  
+  const conversationText = conversationHistory
+    .map(m => `${m.role === "user" ? "Cliente" : "Atendente"}: ${m.content}`)
+    .join("\n");
+  
+  const systemPrompt = `Você é um assistente que cria resumos concisos de conversas de atendimento de uma lanchonete.
+
+OBJETIVO: Criar um resumo MUITO BREVE (máximo 100 palavras) que capture:
+1. O que o cliente pediu/quer
+2. Dados coletados (nome, endereço, pagamento)
+3. Status do pedido
+4. Qualquer preferência ou observação importante
+
+FORMATO: Texto corrido, objetivo, sem introduções.
+
+Exemplo de resumo bom:
+"Cliente João quer 2 X-Tudo e 1 Coca-Cola para entrega na Rua ABC 123. Pagamento via PIX. Pedido em andamento, aguardando confirmação."`;
+
+  try {
+    const headers: Record<string, string> = {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    };
+    
+    if (OPENROUTER_API_KEY) {
+      headers["HTTP-Referer"] = "https://lovable.dev";
+      headers["X-Title"] = "WhatsApp Summary Bot";
+    }
+    
+    const response = await fetch(apiUrl, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: `Resuma esta conversa:\n\n${conversationText}` }
+        ],
+        temperature: 0.3,
+        max_tokens: 200
+      }),
+    });
+    
+    if (!response.ok) {
+      console.error("[Summary] Erro ao gerar resumo:", response.status);
+      return null;
+    }
+    
+    const result = await response.json();
+    const summary = result.choices?.[0]?.message?.content?.trim() || null;
+    
+    if (summary) {
+      console.log(`[Summary] Resumo gerado: ${summary.slice(0, 100)}...`);
+    }
+    
+    return summary;
+  } catch (error) {
+    console.error("[Summary] Erro ao gerar resumo:", error);
+    return null;
+  }
+}
+
+// Verifica se precisa criar/atualizar resumo
+function shouldUpdateSummary(context: ConversationContext): boolean {
+  const historyLength = context.conversationHistory?.length || 0;
+  
+  // Se não tem resumo e já tem mensagens suficientes
+  if (!context.conversationSummary && historyLength >= MESSAGES_BEFORE_SUMMARY) {
+    return true;
+  }
+  
+  // Se tem resumo mas está expirado
+  if (context.lastSummaryAt) {
+    const summaryAge = Date.now() - new Date(context.lastSummaryAt).getTime();
+    const summaryAgeHours = summaryAge / (1000 * 60 * 60);
+    
+    if (summaryAgeHours > SUMMARY_TTL_HOURS && historyLength >= MESSAGES_BEFORE_SUMMARY) {
+      return true;
+    }
+  }
+  
+  // Se o histórico cresceu muito desde o último resumo
+  if (context.conversationSummary && historyLength >= MESSAGES_BEFORE_SUMMARY * 2) {
+    return true;
+  }
+  
+  return false;
+}
+
+// Atualiza resumo e limpa histórico antigo
+async function updateConversationSummary(context: ConversationContext): Promise<ConversationContext> {
+  if (!context.conversationHistory || context.conversationHistory.length < MESSAGES_BEFORE_SUMMARY) {
+    return context;
+  }
+  
+  // Gera resumo das mensagens antigas
+  const messagesToSummarize = context.conversationHistory.slice(0, -4); // Mantém as últimas 4
+  const summary = await generateConversationSummary(messagesToSummarize);
+  
+  if (!summary) {
+    return context;
+  }
+  
+  // Combina resumo anterior com novo
+  const combinedSummary = context.conversationSummary 
+    ? `${context.conversationSummary}\n\nAtualização: ${summary}`
+    : summary;
+  
+  // Limita tamanho do resumo combinado
+  const finalSummary = combinedSummary.length > 500 
+    ? combinedSummary.slice(-500) 
+    : combinedSummary;
+  
+  return {
+    ...context,
+    conversationSummary: finalSummary,
+    lastSummaryAt: new Date().toISOString(),
+    // Mantém apenas as últimas 4 mensagens no histórico
+    conversationHistory: context.conversationHistory.slice(-4)
+  };
 }
 
 // Baixa áudio do WhatsApp via Evolution API
@@ -898,11 +1199,20 @@ function getAttendantSystemPrompt(products: Product[], context: ConversationCont
     ? `DADOS QUE AINDA FALTAM: ${missingData.join(", ")}`
     : "TODOS OS DADOS COLETADOS - pode usar confirm_order";
 
+  // Inclui resumo da conversa se disponível
+  const conversationSummarySection = context?.conversationSummary 
+    ? `────────────────────────
+RESUMO DA CONVERSA ANTERIOR
+────────────────────────
+${context.conversationSummary}
+
+` : "";
+
   return `Você é um atendente virtual simpático de uma lanchonete.
 
 Use linguagem humana, natural, direta e amigável.
 
-────────────────────────
+${conversationSummarySection}────────────────────────
 NÚCLEO DE ESTILO (OBRIGATÓRIO)
 ────────────────────────
 - Respostas curtas, diretas e sem redundância
@@ -3430,8 +3740,7 @@ Deno.serve(async (req) => {
     console.log(`${isAudioMessage ? "Áudio" : "Mensagem"} de ${phone}: ${message || "[AUDIO]"}`);
 
     const supabase = getSupabase();
-    const { state, context } = await getOrCreateSession(supabase, phone);
-
+    
     // Flag para usar modo IA inteligente
     const USE_AI_MODE = true;
     const inputType = isAudioMessage ? "audio" : "text";
@@ -3463,17 +3772,56 @@ Deno.serve(async (req) => {
       console.log(`Transcrição: ${transcript}`);
     }
 
+    // ============ AGRUPAMENTO DE MENSAGENS ============
+    // Salva a mensagem para agrupamento e verifica se deve processar agora
+    await savePendingMessage(supabase, phone, textMessage, messageId, inputType);
+    
+    // Aguarda o tempo de agrupamento
+    await delay(MESSAGE_GROUPING_DELAY_MS);
+    
+    // Busca mensagens agrupadas
+    const groupedMessages = await getAndGroupPendingMessages(supabase, phone);
+    
+    if (!groupedMessages) {
+      // Ainda não é hora de processar, outra mensagem pode ter chegado
+      console.log(`[MessageGrouping] Aguardando mais mensagens de ${phone}`);
+      return new Response(JSON.stringify({ status: "waiting_for_messages" }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+    
+    // Combina todas as mensagens em uma só
+    const combinedMessage = groupedMessages.messages.join("\n\n");
+    const finalInputType = groupedMessages.inputType;
+    
+    console.log(`[MessageGrouping] Processando mensagem combinada: "${combinedMessage.slice(0, 100)}..."`);
+    
+    // Deleta mensagens pendentes
+    await deletePendingMessages(supabase, phone, groupedMessages.messageIds);
+    
+    // Obtém sessão
+    const { state, context } = await getOrCreateSession(supabase, phone);
+
     if (USE_AI_MODE) {
-      // MODO IA INTELIGENTE - Usa DeepSeek para respostas naturais
-      const aiResult = await processWithAI(supabase, phone, textMessage, inputType, context);
+      // ============ RESUMO AUTOMÁTICO DE CONVERSA ============
+      let contextWithSummary = { ...context };
       
-      // Atualiza sessão com novo contexto
+      // Verifica se precisa atualizar o resumo
+      if (shouldUpdateSummary(contextWithSummary)) {
+        console.log("[Summary] Atualizando resumo da conversa...");
+        contextWithSummary = await updateConversationSummary(contextWithSummary);
+      }
+      
+      // MODO IA INTELIGENTE - Usa DeepSeek para respostas naturais
+      const aiResult = await processWithAI(supabase, phone, combinedMessage, finalInputType, contextWithSummary);
+      
+      // Atualiza sessão com novo contexto (incluindo resumo atualizado)
       await updateSession(supabase, phone, "WELCOME", aiResult.newContext);
       
       // REGRA IMPORTANTE: Respeita o formato de entrada
       // - Se cliente mandou TEXTO → responde SOMENTE com TEXTO
       // - Se cliente mandou ÁUDIO → responde SOMENTE com ÁUDIO (voz)
-      if (inputType === "audio") {
+      if (finalInputType === "audio") {
         // Cliente mandou áudio → responde SOMENTE com áudio
         if (aiResult.voiceReply) {
           await sendVoiceResponse(phone, aiResult.voiceReply);
@@ -3482,11 +3830,12 @@ Deno.serve(async (req) => {
           await sendVoiceResponse(phone, aiResult.textReply);
         }
       } else {
-        // Cliente mandou texto → responde SOMENTE com texto
-        await sendWhatsAppMessage(phone, aiResult.textReply, true);
+        // ============ DIVISÃO DE RESPOSTAS LONGAS ============
+        // Cliente mandou texto → responde com texto (dividido se necessário)
+        await sendLongTextResponse(phone, aiResult.textReply);
       }
       
-      return new Response(JSON.stringify({ status: "ok", mode: "ai", inputType }), {
+      return new Response(JSON.stringify({ status: "ok", mode: "ai", inputType: finalInputType, messagesGrouped: groupedMessages.messages.length }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
@@ -3494,10 +3843,10 @@ Deno.serve(async (req) => {
     // MODO LEGADO - Máquina de estados tradicional
     let result: ProcessResult & { sendVoiceReply?: boolean; voiceText?: string };
 
-    if (isAudioMessage) {
+    if (finalInputType === "audio") {
       result = await processAudioMessage(supabase, phone, messageId, context, state);
     } else {
-      result = await processMessage(supabase, phone, message, state, context);
+      result = await processMessage(supabase, phone, combinedMessage, state, context);
     }
 
     await updateSession(supabase, phone, result.newState, result.newContext);
