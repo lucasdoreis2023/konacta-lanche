@@ -21,7 +21,35 @@ type ConversationState =
   | "CONFIRM"
   | "AWAITING_ORDER_NUMBER"
   | "PROMOTIONS"
-  | "VOICE_ORDER_CONFIRM";
+  | "VOICE_ORDER_CONFIRM"
+  | "VOICE_ORDERING"; // Novo estado para conversa por voz
+
+// Palavras-chave para detecção de intenção
+const INTENT_KEYWORDS = {
+  menu: ["cardápio", "cardapio", "menu", "opções", "opcoes", "ver produtos", "o que tem", "quais produtos"],
+  startOrder: ["pedido", "pedir", "quero", "gostaria", "lanche", "comer", "comprar", "fazer pedido", "realizar pedido"],
+  status: ["status", "meu pedido", "acompanhar", "onde está", "onde esta", "cadê", "cade", "andamento", "rastrear"],
+  greeting: ["oi", "olá", "ola", "bom dia", "boa tarde", "boa noite", "e aí", "e ai", "hello"],
+  confirm: ["sim", "isso", "correto", "confirmar", "confirmo", "pode ser", "ok", "beleza", "certo"],
+  deny: ["não", "nao", "errado", "cancelar", "refazer", "trocar"],
+  finish: ["finalizar", "fechar", "concluir", "só isso", "so isso", "é isso", "e isso", "pronto", "acabou", "terminei"],
+};
+
+// Detecta intenção a partir do texto (transcrição ou mensagem)
+function detectIntent(text: string): { intent: string; confidence: number } {
+  const textLower = text.toLowerCase().trim();
+  
+  // Prioridade: finish > confirm > deny > status > menu > startOrder > greeting
+  for (const [intent, keywords] of Object.entries(INTENT_KEYWORDS)) {
+    for (const keyword of keywords) {
+      if (textLower.includes(keyword)) {
+        return { intent, confidence: 1 };
+      }
+    }
+  }
+  
+  return { intent: "unknown", confidence: 0 };
+}
 
 interface ConversationContext {
   cart: Array<{ productId: string; productName: string; quantity: number; price: number }>;
@@ -288,6 +316,124 @@ async function transcribeAudio(audioBuffer: ArrayBuffer): Promise<string | null>
   } catch (error) {
     console.error("Erro na transcrição:", error);
     return null;
+  }
+}
+
+// Gera áudio de resposta usando ElevenLabs TTS
+async function generateTTSAudio(text: string): Promise<ArrayBuffer | null> {
+  const ELEVENLABS_API_KEY = Deno.env.get("ELEVENLABS_API_KEY");
+  
+  if (!ELEVENLABS_API_KEY) {
+    console.error("ELEVENLABS_API_KEY não configurada para TTS");
+    return null;
+  }
+
+  // Voice ID: Sarah (feminina, natural) - pode trocar por outra voz
+  const voiceId = "EXAVITQu4vr4xnSDxMaL";
+
+  try {
+    const response = await fetch(
+      `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=mp3_44100_128`,
+      {
+        method: "POST",
+        headers: {
+          "xi-api-key": ELEVENLABS_API_KEY,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          text,
+          model_id: "eleven_turbo_v2_5",
+          voice_settings: {
+            stability: 0.5,
+            similarity_boost: 0.75,
+            style: 0.3,
+            use_speaker_boost: true,
+            speed: 1.1,
+          },
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      console.error("Erro ElevenLabs TTS:", response.status, await response.text());
+      return null;
+    }
+
+    return await response.arrayBuffer();
+  } catch (error) {
+    console.error("Erro ao gerar áudio TTS:", error);
+    return null;
+  }
+}
+
+// Envia mensagem de áudio via Evolution API
+async function sendWhatsAppAudio(phone: string, audioBuffer: ArrayBuffer): Promise<boolean> {
+  let evolutionUrl = Deno.env.get("EVOLUTION_API_URL");
+  const evolutionKey = Deno.env.get("EVOLUTION_API_KEY");
+  const instanceName = Deno.env.get("EVOLUTION_INSTANCE_NAME");
+
+  if (!evolutionUrl || !evolutionKey || !instanceName) {
+    console.error("Evolution API não configurada para áudio");
+    return false;
+  }
+
+  evolutionUrl = evolutionUrl.replace(/\/manager\/?$/, "").replace(/\/$/, "");
+  const url = `${evolutionUrl}/message/sendWhatsAppAudio/${instanceName}`;
+
+  try {
+    // Converte ArrayBuffer para base64 em chunks
+    const bytes = new Uint8Array(audioBuffer);
+    const chunkSize = 8192;
+    let binary = "";
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
+      for (let j = 0; j < chunk.length; j++) {
+        binary += String.fromCharCode(chunk[j]);
+      }
+    }
+    const base64Audio = btoa(binary);
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        apikey: evolutionKey,
+      },
+      body: JSON.stringify({
+        number: phone,
+        audio: `data:audio/mp3;base64,${base64Audio}`,
+      }),
+    });
+
+    if (!response.ok) {
+      console.error("Erro ao enviar áudio:", response.status, await response.text());
+      return false;
+    }
+
+    return true;
+  } catch (error) {
+    console.error("Erro ao enviar áudio WhatsApp:", error);
+    return false;
+  }
+}
+
+// Envia resposta de voz (TTS) para o cliente
+async function sendVoiceResponse(phone: string, text: string): Promise<void> {
+  // Remove emojis e formatação para TTS
+  const cleanText = text
+    .replace(/\*([^*]+)\*/g, "$1") // Remove negrito
+    .replace(/[🎤📝🛒💰✅❌📋🍔🍟👋🎉📦💛🔥🏃🛵💳💵📱📍🗑️😕🤔😊😋👨‍🍳📥📭🔄❓]/g, "")
+    .replace(/\n{2,}/g, ". ")
+    .replace(/\n/g, ", ")
+    .trim();
+
+  if (!cleanText || cleanText.length < 5) return;
+
+  await sendRecordingStatus(phone);
+  
+  const audioBuffer = await generateTTSAudio(cleanText);
+  if (audioBuffer) {
+    await sendWhatsAppAudio(phone, audioBuffer);
   }
 }
 
@@ -637,8 +783,9 @@ async function processAudioMessage(
   supabase: ReturnType<typeof getSupabase>,
   phone: string,
   messageId: string,
-  context: ConversationContext
-): Promise<ProcessResult> {
+  context: ConversationContext,
+  currentState: ConversationState
+): Promise<ProcessResult & { sendVoiceReply?: boolean; voiceText?: string }> {
   const greeting = getTimeGreeting();
   let newContext = { ...context };
 
@@ -654,6 +801,8 @@ async function processAudioMessage(
       newState: "WELCOME",
       messages: ["😕 Não consegui baixar o áudio. Pode tentar enviar novamente ou digitar seu pedido?"],
       newContext,
+      sendVoiceReply: true,
+      voiceText: "Não consegui baixar o áudio. Pode tentar enviar novamente?"
     };
   }
 
@@ -668,43 +817,247 @@ async function processAudioMessage(
         "Pode tentar falar mais devagar ou digitar seu pedido?\n\nDigite *CARDÁPIO* para ver as opções."
       ],
       newContext,
+      sendVoiceReply: true,
+      voiceText: "Não consegui entender o áudio. Pode tentar falar mais devagar?"
     };
   }
 
   console.log(`Transcrição do áudio de ${phone}: ${transcript}`);
-
-  // Busca todos os produtos
-  const products = await getAllProducts(supabase);
   
-  // Interpreta o pedido com IA
-  const interpretation = await interpretVoiceOrder(transcript, products);
-
-  if (!interpretation.understood || interpretation.items.length === 0) {
+  // Detecta intenção do cliente
+  const { intent } = detectIntent(transcript);
+  console.log(`Intenção detectada: ${intent} para transcrição: "${transcript}"`);
+  
+  // Se está no estado VOICE_ORDER_CONFIRM, trata confirmação/negação
+  if (currentState === "VOICE_ORDER_CONFIRM") {
+    if (intent === "confirm") {
+      newContext.pendingVoiceOrder = undefined;
+      const cartTotal = newContext.cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
+      
+      return {
+        newState: "CHECKOUT_NAME",
+        messages: [
+          `📝 Ouvi: "${transcript}"`,
+          "✅ Ótimo! Pedido confirmado no carrinho!",
+          `🛒 Total atual: ${formatPrice(cartTotal)}`,
+          "Vamos finalizar? Me diz seu *nome*:"
+        ],
+        newContext,
+        sendVoiceReply: true,
+        voiceText: "Ótimo! Pedido confirmado. Vamos finalizar. Me diz seu nome."
+      };
+    }
+    
+    if (intent === "deny") {
+      const pendingItems = newContext.pendingVoiceOrder?.items || [];
+      for (const pending of pendingItems) {
+        const idx = newContext.cart.findIndex(c => 
+          c.productName.toLowerCase() === pending.name.toLowerCase()
+        );
+        if (idx >= 0) {
+          newContext.cart.splice(idx, 1);
+        }
+      }
+      newContext.pendingVoiceOrder = undefined;
+      
+      return {
+        newState: "WELCOME",
+        messages: [
+          `📝 Ouvi: "${transcript}"`,
+          "❌ Ok, cancelei os itens do áudio.",
+          "Pode *enviar outro áudio* ou digitar *CARDÁPIO* para escolher manualmente!"
+        ],
+        newContext,
+        sendVoiceReply: true,
+        voiceText: "Ok, cancelei os itens. Pode enviar outro áudio com seu pedido."
+      };
+    }
+  }
+  
+  // Se está no estado VOICE_ORDERING, continua adicionando itens
+  if (currentState === "VOICE_ORDERING") {
+    // Detecta se quer finalizar
+    if (intent === "finish") {
+      if (newContext.cart.length === 0) {
+        return {
+          newState: "VOICE_ORDERING",
+          messages: [
+            `📝 Ouvi: "${transcript}"`,
+            "Seu carrinho está vazio! O que você gostaria de pedir?"
+          ],
+          newContext,
+          sendVoiceReply: true,
+          voiceText: "Seu carrinho está vazio. O que você gostaria de pedir?"
+        };
+      }
+      
+      const cartList = newContext.cart
+        .map(item => `• ${item.quantity}x ${item.productName} - ${formatPrice(item.price * item.quantity)}`)
+        .join("\n");
+      const total = newContext.cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
+      
+      return {
+        newState: "CHECKOUT_NAME",
+        messages: [
+          `📝 Ouvi: "${transcript}"`,
+          `🛒 *Seu pedido:*\n\n${cartList}\n\n💰 *Total: ${formatPrice(total)}*`,
+          "Perfeito! Vamos finalizar. Me diz seu *nome*:"
+        ],
+        newContext,
+        sendVoiceReply: true,
+        voiceText: `Anotado! Seu total é ${formatPrice(total)}. Me diz seu nome para finalizar.`
+      };
+    }
+  }
+  
+  // Trata intenções globais
+  
+  // INTENÇÃO: Cardápio/Menu
+  if (intent === "menu") {
+    const categories = await getCategories(supabase);
+    const categoryList = categories
+      .map((cat, i) => `*${i + 1}* - ${cat.name}`)
+      .join("\n");
+    
+    return {
+      newState: "MENU",
+      messages: [
+        `📝 Ouvi: "${transcript}"`,
+        `📋 *NOSSO CARDÁPIO*\n\n${categoryList}\n\nDigite o *número* da categoria.\n\n🎤 Ou fale o que você quer pedir!`
+      ],
+      newContext,
+      sendVoiceReply: true,
+      voiceText: "Aqui está nosso cardápio! Pode falar o que você quer pedir ou escolher uma categoria."
+    };
+  }
+  
+  // INTENÇÃO: Status do pedido
+  if (intent === "status") {
+    const orders = await getCustomerOrders(supabase, phone);
+    
+    if (orders.length === 0) {
+      return {
+        newState: "WELCOME",
+        messages: [
+          `📝 Ouvi: "${transcript}"`,
+          "📭 Você não tem pedidos em andamento no momento.",
+          "Que tal fazer um pedido? Fale o que você quer! 😋"
+        ],
+        newContext,
+        sendVoiceReply: true,
+        voiceText: "Você não tem pedidos em andamento. Que tal fazer um? Me fala o que você quer!"
+      };
+    }
+    
+    const order = orders[0];
+    const status = formatOrderStatus(order.status);
+    
     return {
       newState: "WELCOME",
       messages: [
         `📝 Ouvi: "${transcript}"`,
-        "Hmm, não consegui identificar os produtos do seu pedido. 🤔",
-        "Pode tentar de novo ou digite *CARDÁPIO* para ver nossos produtos!"
+        `📦 *PEDIDO #${order.order_number}*\n\n${status.emoji} *${status.label}*\n${status.description}`,
+        "Quer fazer mais um pedido? É só falar!"
       ],
       newContext,
+      sendVoiceReply: true,
+      voiceText: `Seu pedido número ${order.order_number} está ${status.label}. ${status.description}`
+    };
+  }
+  
+  // INTENÇÃO: Saudação ou início de pedido
+  if (intent === "greeting" || intent === "startOrder") {
+    // Se é saudação simples sem produtos específicos, entra em modo de conversa por voz
+    const products = await getAllProducts(supabase);
+    const interpretation = await interpretVoiceOrder(transcript, products);
+    
+    // Se identificou produtos, adiciona ao carrinho
+    if (interpretation.understood && interpretation.items.length > 0) {
+      // Adiciona itens ao carrinho
+      for (const item of interpretation.items) {
+        if (item.productId && item.price) {
+          const existingItem = newContext.cart.find(c => c.productId === item.productId);
+          if (existingItem) {
+            existingItem.quantity += item.quantity;
+          } else {
+            newContext.cart.push({
+              productId: item.productId,
+              productName: item.name,
+              quantity: item.quantity,
+              price: item.price
+            });
+          }
+        }
+      }
+      
+      const itemsList = interpretation.items
+        .map(item => `• ${item.quantity}x ${item.name}`)
+        .join("\n");
+      const total = newContext.cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
+      
+      return {
+        newState: "VOICE_ORDERING",
+        messages: [
+          `📝 Ouvi: "${transcript}"`,
+          `✅ Anotado!\n\n${itemsList}`,
+          `🛒 Total parcial: ${formatPrice(total)}`,
+          "Deseja *mais alguma coisa*? Pode falar!\n\nOu diga *FINALIZAR* quando terminar."
+        ],
+        newContext,
+        sendVoiceReply: true,
+        voiceText: `Anotado! ${interpretation.items.map(i => `${i.quantity} ${i.name}`).join(", ")}. Total parcial: ${formatPrice(total)}. Quer mais alguma coisa?`
+      };
+    }
+    
+    // Se não identificou produtos, pergunta o que quer pedir
+    return {
+      newState: "VOICE_ORDERING",
+      messages: [
+        `📝 Ouvi: "${transcript}"`,
+        `${greeting}! Que bom que você quer fazer um pedido! 😊`,
+        "O que você gostaria de pedir?\n\n🎤 Pode falar os itens diretamente!"
+      ],
+      newContext,
+      sendVoiceReply: true,
+      voiceText: `${greeting}! Que bom! O que você gostaria de pedir?`
     };
   }
 
-  // Adiciona itens ao carrinho temporariamente para confirmação
-  const itemsList = interpretation.items
-    .map(item => `• ${item.quantity}x ${item.name} - ${formatPrice((item.price || 0) * item.quantity)}`)
-    .join("\n");
-  
-  const total = interpretation.items.reduce((sum, item) => sum + (item.price || 0) * item.quantity, 0);
+  // Se nenhuma intenção específica, tenta interpretar como pedido
+  const products = await getAllProducts(supabase);
+  const interpretation = await interpretVoiceOrder(transcript, products);
 
-  // Salva pedido pendente no contexto
-  newContext.pendingVoiceOrder = {
-    items: interpretation.items.map(i => ({ name: i.name, quantity: i.quantity })),
-    transcript
-  };
+  if (!interpretation.understood || interpretation.items.length === 0) {
+    // Não entendeu - mas detecta se há palavras que indicam desejo de pedir
+    const wantsToBuy = /quero|queria|gostaria|preciso|me vê|me da|me dá|manda|traz/i.test(transcript);
+    
+    if (wantsToBuy) {
+      return {
+        newState: "VOICE_ORDERING",
+        messages: [
+          `📝 Ouvi: "${transcript}"`,
+          "Entendi que você quer fazer um pedido! 😊",
+          "Mas não identifiquei os produtos. Pode falar mais claramente?\n\nExemplo: *quero dois hambúrgueres e uma coca*"
+        ],
+        newContext,
+        sendVoiceReply: true,
+        voiceText: "Entendi que você quer fazer um pedido. Pode falar mais claramente o que deseja? Por exemplo: quero dois hambúrgueres e uma coca."
+      };
+    }
+    
+    return {
+      newState: currentState === "VOICE_ORDERING" ? "VOICE_ORDERING" : "WELCOME",
+      messages: [
+        `📝 Ouvi: "${transcript}"`,
+        "😊 O que você gostaria de fazer?\n\n🎤 *Fazer pedido* - fale os itens que deseja\n📋 *CARDÁPIO* - ver nossos produtos\n📦 *STATUS* - consultar seu pedido"
+      ],
+      newContext,
+      sendVoiceReply: true,
+      voiceText: "O que você gostaria de fazer? Pode falar os itens do pedido, pedir o cardápio ou consultar o status."
+    };
+  }
 
-  // Adiciona ao carrinho
+  // Adiciona itens ao carrinho
   for (const item of interpretation.items) {
     if (item.productId && item.price) {
       const existingItem = newContext.cart.find(c => c.productId === item.productId);
@@ -721,15 +1074,22 @@ async function processAudioMessage(
     }
   }
 
+  const itemsList = interpretation.items
+    .map(item => `• ${item.quantity}x ${item.name}`)
+    .join("\n");
+  const total = newContext.cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
+
   return {
-    newState: "VOICE_ORDER_CONFIRM",
+    newState: "VOICE_ORDERING",
     messages: [
-      `🎤 Entendi seu pedido!`,
       `📝 Ouvi: "${transcript}"`,
-      `🛒 *Itens identificados:*\n\n${itemsList}\n\n💰 *Total: ${formatPrice(total)}*`,
-      "Está correto?\n\n*SIM* - Confirmar e continuar\n*NÃO* - Cancelar e tentar de novo\n*CARDÁPIO* - Ver produtos disponíveis"
+      `✅ Anotado!\n\n${itemsList}`,
+      `🛒 Total parcial: ${formatPrice(total)}`,
+      "Deseja *mais alguma coisa*? Pode falar!\n\nOu diga *FINALIZAR* quando terminar."
     ],
     newContext,
+    sendVoiceReply: true,
+    voiceText: `Anotado! ${interpretation.items.map(i => `${i.quantity} ${i.name}`).join(", ")}. Total parcial: ${formatPrice(total)}. Quer mais alguma coisa?`
   };
 }
 
@@ -919,6 +1279,85 @@ async function processMessage(
     return {
       newState: "VOICE_ORDER_CONFIRM",
       messages: ["Digite *SIM* para confirmar ou *NÃO* para cancelar e tentar de novo."],
+      newContext,
+    };
+  }
+
+  // Estado de conversa por voz (continuando pedido)
+  if (state === "VOICE_ORDERING") {
+    // Detecta intenção via texto
+    const { intent } = detectIntent(message);
+    
+    // Finalizar pedido
+    if (intent === "finish" || ["finalizar", "fechar", "concluir", "so isso", "só isso", "é isso", "e isso", "pronto"].includes(msgLower)) {
+      if (newContext.cart.length === 0) {
+        return {
+          newState: "VOICE_ORDERING",
+          messages: [
+            "🛒 Seu carrinho está vazio!",
+            "O que você gostaria de pedir?\n\n🎤 Envie um *áudio* ou digite *CARDÁPIO* para ver as opções."
+          ],
+          newContext,
+        };
+      }
+      
+      const cartList = newContext.cart
+        .map(item => `• ${item.quantity}x ${item.productName} - ${formatPrice(item.price * item.quantity)}`)
+        .join("\n");
+      const total = newContext.cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
+      
+      return {
+        newState: "CHECKOUT_NAME",
+        messages: [
+          `🛒 *Seu pedido:*\n\n${cartList}\n\n💰 *Total: ${formatPrice(total)}*`,
+          "Vamos finalizar? Me diz seu *nome*:"
+        ],
+        newContext,
+      };
+    }
+    
+    // Ver cardápio
+    if (intent === "menu" || ["cardapio", "cardápio", "menu"].includes(msgLower)) {
+      const categories = await getCategories(supabase);
+      const categoryList = categories
+        .map((cat, i) => `*${i + 1}* - ${cat.name}`)
+        .join("\n");
+      return {
+        newState: "MENU",
+        messages: [`📋 *CARDÁPIO*\n\n${categoryList}\n\nDigite o número da categoria.`],
+        newContext,
+      };
+    }
+    
+    // Ver carrinho
+    if (["carrinho", "ver carrinho"].includes(msgLower)) {
+      if (newContext.cart.length === 0) {
+        return {
+          newState: "VOICE_ORDERING",
+          messages: ["🛒 Carrinho vazio! O que você quer pedir?"],
+          newContext,
+        };
+      }
+      const cartList = newContext.cart
+        .map((item, i) => `${i + 1}. ${item.quantity}x ${item.productName} - ${formatPrice(item.price * item.quantity)}`)
+        .join("\n");
+      const total = newContext.cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
+      return {
+        newState: "VOICE_ORDERING",
+        messages: [
+          `🛒 *Seu Carrinho*\n\n${cartList}\n\n💰 *Total: ${formatPrice(total)}*`,
+          "Quer *mais alguma coisa*? Ou diga *FINALIZAR* quando terminar."
+        ],
+        newContext,
+      };
+    }
+    
+    // Tenta interpretar como pedido adicional
+    return {
+      newState: "VOICE_ORDERING",
+      messages: [
+        "O que mais você gostaria?\n\n🎤 Envie um *áudio* com mais itens\n✅ *FINALIZAR* - Concluir pedido\n📋 *CARDÁPIO* - Ver opções"
+      ],
       newContext,
     };
   }
@@ -1509,11 +1948,11 @@ Deno.serve(async (req) => {
     const supabase = getSupabase();
     const { state, context } = await getOrCreateSession(supabase, phone);
 
-    let result: ProcessResult;
+    let result: ProcessResult & { sendVoiceReply?: boolean; voiceText?: string };
 
     if (isAudioMessage) {
       // Processa áudio
-      result = await processAudioMessage(supabase, phone, messageId, context);
+      result = await processAudioMessage(supabase, phone, messageId, context, state);
     } else {
       // Processa texto
       result = await processMessage(supabase, phone, message, state, context);
@@ -1525,12 +1964,18 @@ Deno.serve(async (req) => {
     if (!isAudioMessage) {
       await sendMultipleMessages(phone, result.messages);
     } else {
-      // Para áudio, já enviamos a primeira mensagem, então envia o resto
+      // Para áudio, envia as mensagens de texto
       for (let i = 0; i < result.messages.length; i++) {
         if (i > 0) {
           await delay(800 + Math.random() * 700);
         }
         await sendWhatsAppMessage(phone, result.messages[i], true);
+      }
+      
+      // Envia resposta em áudio se configurado
+      if (result.sendVoiceReply && result.voiceText) {
+        await delay(500);
+        await sendVoiceResponse(phone, result.voiceText);
       }
     }
 
