@@ -2,6 +2,7 @@ export type OrderChannel = 'SITE' | 'WHATSAPP';
 export type OrderType = 'PRESENCIAL' | 'DELIVERY';
 export type PaymentMethod = 'PIX' | 'CARTAO' | 'DINHEIRO';
 export type OrderStatus = 'RECEBIDO' | 'EM_PREPARO' | 'PRONTO' | 'ENTREGUE' | 'CANCELADO';
+export type AppRole = 'admin' | 'user';
 
 export interface Category {
   id: string;
@@ -57,4 +58,47 @@ export interface CartItem {
   product: Product;
   quantity: number;
   notes?: string;
+}
+
+export interface UserRole {
+  id: string;
+  user_id: string;
+  role: AppRole;
+}
+
+export interface StoreSettings {
+  id: string;
+  key: string;
+  value: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface StoreInfo {
+  name: string;
+  phone: string;
+  address: string;
+  description: string;
+}
+
+export interface DeliverySettings {
+  fee: number;
+  min_order: number;
+  enabled: boolean;
+}
+
+export interface DayHours {
+  open: string;
+  close: string;
+  enabled: boolean;
+}
+
+export interface StoreHours {
+  monday: DayHours;
+  tuesday: DayHours;
+  wednesday: DayHours;
+  thursday: DayHours;
+  friday: DayHours;
+  saturday: DayHours;
+  sunday: DayHours;
 }
