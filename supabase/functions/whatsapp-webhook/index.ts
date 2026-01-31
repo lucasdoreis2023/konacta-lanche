@@ -1725,8 +1725,63 @@ async function processAIAction(
     
     // NOVA AÇÃO: Solicitar revisão manualmente
     case "request_review":
+      // IMPORTANTE: Extrai e aplica dados do actionData antes de criar o pedido (igual confirm_order)
+      // Adiciona itens ao carrinho se vieram no actionData
+      if (actionData.items && Array.isArray(actionData.items) && actionData.items.length > 0) {
+        for (const item of actionData.items) {
+          if (!item?.name) continue;
+          const itemName = String(item.name);
+          const qty = Number(item.quantity || 1);
+          const product = products.find(
+            (p) =>
+              p.name.toLowerCase().includes(itemName.toLowerCase()) ||
+              itemName.toLowerCase().includes(p.name.toLowerCase())
+          );
+
+          if (!product) continue;
+
+          const existing = newContext.cart.find((c) => c.productId === product.id);
+          if (existing) {
+            existing.quantity += qty;
+          } else {
+            newContext.cart.push({
+              productId: product.id,
+              productName: product.name,
+              quantity: qty,
+              price: product.price,
+            });
+          }
+          console.log(`[AI Action] Item adicionado via request_review: ${qty}x ${product.name}`);
+        }
+      }
+      
+      // Atualiza dados do contexto se vieram no actionData
+      if (isValidCustomerName(actionData.name)) {
+        newContext.customerName = actionData.name.trim();
+        console.log(`[AI Action] Nome definido via request_review: ${newContext.customerName}`);
+      }
+      if (actionData.delivery_type) {
+        newContext.orderType = actionData.delivery_type === "DELIVERY" ? "DELIVERY" : "PRESENCIAL";
+        console.log(`[AI Action] Tipo definido via request_review: ${newContext.orderType}`);
+      }
+      if (actionData.address) {
+        newContext.deliveryAddress = actionData.address;
+        console.log(`[AI Action] Endereço definido via request_review: ${newContext.deliveryAddress}`);
+      }
+      if (actionData.payment) {
+        const paymentMap: Record<string, "PIX" | "CARTAO" | "DINHEIRO"> = {
+          "pix": "PIX", "PIX": "PIX",
+          "cartao": "CARTAO", "cartão": "CARTAO", "CARTAO": "CARTAO",
+          "dinheiro": "DINHEIRO", "DINHEIRO": "DINHEIRO",
+        };
+        const key = String(actionData.payment).toLowerCase().trim();
+        newContext.paymentMethod = paymentMap[key] || paymentMap[String(actionData.payment)] || actionData.payment;
+        console.log(`[AI Action] Pagamento definido via request_review: ${newContext.paymentMethod}`);
+      }
+      
       if (newContext.cart.length > 0) {
         console.log("[AI Action] Cliente solicitou revisão manualmente");
+        console.log(`[AI Action] Dados antes de criar pedido - Nome: ${newContext.customerName}, Tipo: ${newContext.orderType}, Endereço: ${newContext.deliveryAddress}, Pagamento: ${newContext.paymentMethod}`);
         orderNumber = (await createOrder(supabase, newContext, phone, inputType, true, "Solicitado pelo cliente")) ?? undefined;
         if (orderNumber) {
           sentToReview = true;
