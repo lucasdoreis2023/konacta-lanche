@@ -8,6 +8,7 @@ const corsHeaders = {
 
 // Estados da máquina de estados
 type ConversationState =
+  | "FIRST_CONTACT"
   | "WELCOME"
   | "MENU"
   | "CATEGORY"
@@ -18,7 +19,8 @@ type ConversationState =
   | "CHECKOUT_ADDRESS"
   | "CHECKOUT_PAYMENT"
   | "CONFIRM"
-  | "AWAITING_ORDER_NUMBER";
+  | "AWAITING_ORDER_NUMBER"
+  | "PROMOTIONS";
 
 interface ConversationContext {
   cart: Array<{ productId: string; productName: string; quantity: number; price: number }>;
@@ -27,6 +29,7 @@ interface ConversationContext {
   orderType?: "PRESENCIAL" | "DELIVERY";
   deliveryAddress?: string;
   paymentMethod?: "PIX" | "CARTAO" | "DINHEIRO";
+  isFirstContact?: boolean;
 }
 
 interface Category {
@@ -52,6 +55,28 @@ interface Order {
   customer_phone: string;
 }
 
+// Saudações baseadas no horário
+function getTimeGreeting(): string {
+  const hour = new Date().getHours();
+  if (hour >= 5 && hour < 12) return "Bom dia";
+  if (hour >= 12 && hour < 18) return "Boa tarde";
+  return "Boa noite";
+}
+
+// Delay helper
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// Calcula delay baseado no tamanho da mensagem (simula digitação real)
+function calculateTypingDelay(message: string): number {
+  const wordsPerMinute = 200; // velocidade de digitação simulada
+  const words = message.split(/\s+/).length;
+  const baseDelay = (words / wordsPerMinute) * 60 * 1000;
+  // Mínimo 1s, máximo 3s
+  return Math.min(Math.max(baseDelay, 1000), 3000);
+}
+
 // Inicializa cliente Supabase
 const getSupabase = () => {
   return createClient(
@@ -60,8 +85,42 @@ const getSupabase = () => {
   );
 };
 
-// Envia mensagem via Evolution API
-async function sendWhatsAppMessage(phone: string, message: string) {
+// Envia status de "digitando"
+async function sendTypingStatus(phone: string, duration: number = 2000): Promise<void> {
+  let evolutionUrl = Deno.env.get("EVOLUTION_API_URL");
+  const evolutionKey = Deno.env.get("EVOLUTION_API_KEY");
+  const instanceName = Deno.env.get("EVOLUTION_INSTANCE_NAME");
+
+  if (!evolutionUrl || !evolutionKey || !instanceName) {
+    console.error("Evolution API não configurada para typing");
+    return;
+  }
+
+  evolutionUrl = evolutionUrl.replace(/\/manager\/?$/, "").replace(/\/$/, "");
+  const url = `${evolutionUrl}/chat/sendPresence/${instanceName}`;
+
+  try {
+    await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        apikey: evolutionKey,
+      },
+      body: JSON.stringify({
+        number: phone,
+        options: {
+          delay: duration,
+          presence: "composing"
+        }
+      }),
+    });
+  } catch (error) {
+    console.error("Erro ao enviar typing:", error);
+  }
+}
+
+// Envia mensagem via Evolution API com delay natural
+async function sendWhatsAppMessage(phone: string, message: string, useTyping: boolean = true) {
   let evolutionUrl = Deno.env.get("EVOLUTION_API_URL");
   const evolutionKey = Deno.env.get("EVOLUTION_API_KEY");
   const instanceName = Deno.env.get("EVOLUTION_INSTANCE_NAME");
@@ -71,9 +130,15 @@ async function sendWhatsAppMessage(phone: string, message: string) {
     return;
   }
 
-  // Remove trailing slash e /manager se existir
   evolutionUrl = evolutionUrl.replace(/\/manager\/?$/, "").replace(/\/$/, "");
   
+  // Envia status de digitando se habilitado
+  if (useTyping) {
+    const typingDuration = calculateTypingDelay(message);
+    await sendTypingStatus(phone, typingDuration);
+    await delay(typingDuration);
+  }
+
   const url = `${evolutionUrl}/message/sendText/${instanceName}`;
 
   try {
@@ -98,6 +163,17 @@ async function sendWhatsAppMessage(phone: string, message: string) {
   }
 }
 
+// Envia múltiplas mensagens com delays naturais entre elas
+async function sendMultipleMessages(phone: string, messages: string[]): Promise<void> {
+  for (let i = 0; i < messages.length; i++) {
+    if (i > 0) {
+      // Delay entre mensagens (800ms - 1500ms)
+      await delay(800 + Math.random() * 700);
+    }
+    await sendWhatsAppMessage(phone, messages[i], true);
+  }
+}
+
 // Envia mensagem com botões via Evolution API
 interface ButtonOption {
   buttonId: string;
@@ -116,12 +192,17 @@ async function sendWhatsAppButtons(
 
   if (!evolutionUrl || !evolutionKey || !instanceName) {
     console.error("Evolution API não configurada");
-    // Fallback para mensagem de texto
     const fallbackText = `${title}\n\n${description}\n\n${buttons.map((b, i) => `*${i + 1}* - ${b.text}`).join("\n")}`;
     return sendWhatsAppMessage(phone, fallbackText);
   }
 
   evolutionUrl = evolutionUrl.replace(/\/manager\/?$/, "").replace(/\/$/, "");
+  
+  // Envia typing antes dos botões
+  const typingDuration = calculateTypingDelay(description);
+  await sendTypingStatus(phone, typingDuration);
+  await delay(typingDuration);
+
   const url = `${evolutionUrl}/message/sendButtons/${instanceName}`;
 
   const buttonPayload: ButtonOption[] = buttons.map((b) => ({
@@ -148,15 +229,13 @@ async function sendWhatsAppButtons(
     
     if (!response.ok) {
       console.error("Erro ao enviar botões, usando fallback:", response.status, responseText);
-      // Fallback para mensagem de texto simples
       const fallbackText = `${title}\n\n${description}\n\n${buttons.map((b, i) => `*${i + 1}* - ${b.text}`).join("\n")}`;
-      return sendWhatsAppMessage(phone, fallbackText);
+      return sendWhatsAppMessage(phone, fallbackText, false); // já fez typing
     }
   } catch (error) {
     console.error("Erro ao enviar botões:", error);
-    // Fallback
     const fallbackText = `${title}\n\n${description}\n\n${buttons.map((b, i) => `*${i + 1}* - ${b.text}`).join("\n")}`;
-    return sendWhatsAppMessage(phone, fallbackText);
+    return sendWhatsAppMessage(phone, fallbackText, false);
   }
 }
 
@@ -172,7 +251,7 @@ function formatPrice(price: number): string {
 async function getOrCreateSession(
   supabase: ReturnType<typeof getSupabase>,
   phone: string
-): Promise<{ state: ConversationState; context: ConversationContext }> {
+): Promise<{ state: ConversationState; context: ConversationContext; isNew: boolean }> {
   const { data: session } = await supabase
     .from("conversation_sessions")
     .select("*")
@@ -183,17 +262,18 @@ async function getOrCreateSession(
     return {
       state: session.current_state as ConversationState,
       context: (session.context_json as ConversationContext) || { cart: [] },
+      isNew: false
     };
   }
 
-  // Cria nova sessão
+  // Cria nova sessão - primeiro contato
   await supabase.from("conversation_sessions").insert({
     phone_number: phone,
-    current_state: "WELCOME",
-    context_json: { cart: [] },
+    current_state: "FIRST_CONTACT",
+    context_json: { cart: [], isFirstContact: true },
   });
 
-  return { state: "WELCOME", context: { cart: [] } };
+  return { state: "FIRST_CONTACT", context: { cart: [], isFirstContact: true }, isNew: true };
 }
 
 // Atualiza sessão
@@ -249,12 +329,24 @@ async function getProductById(
   return data;
 }
 
+// Busca produtos em promoção (os 5 mais baratos como "promoção")
+async function getPromotionProducts(
+  supabase: ReturnType<typeof getSupabase>
+): Promise<Product[]> {
+  const { data } = await supabase
+    .from("products")
+    .select("id, name, description, price, category_id")
+    .eq("active", true)
+    .order("price", { ascending: true })
+    .limit(5);
+  return data || [];
+}
+
 // Busca pedidos recentes do cliente pelo telefone
 async function getCustomerOrders(
   supabase: ReturnType<typeof getSupabase>,
   phone: string
 ): Promise<Order[]> {
-  // Normaliza o telefone para buscar (remove + e espaços)
   const normalizedPhone = phone.replace(/\D/g, "");
   
   const { data } = await supabase
@@ -285,11 +377,11 @@ async function getOrderByNumber(
 // Formata status do pedido para exibição
 function formatOrderStatus(status: string): { emoji: string; label: string; description: string } {
   const statusMap: Record<string, { emoji: string; label: string; description: string }> = {
-    RECEBIDO: { emoji: "📥", label: "Recebido", description: "Seu pedido foi recebido e está na fila" },
-    EM_PREPARO: { emoji: "👨‍🍳", label: "Em Preparo", description: "Estamos preparando seu pedido" },
-    PRONTO: { emoji: "✅", label: "Pronto", description: "Seu pedido está pronto!" },
-    ENTREGUE: { emoji: "🎉", label: "Entregue", description: "Pedido entregue com sucesso" },
-    CANCELADO: { emoji: "❌", label: "Cancelado", description: "Pedido foi cancelado" },
+    RECEBIDO: { emoji: "📥", label: "Recebido", description: "Seu pedido foi recebido e está aguardando preparo" },
+    EM_PREPARO: { emoji: "👨‍🍳", label: "Em Preparo", description: "Nossa equipe está preparando seu pedido com carinho" },
+    PRONTO: { emoji: "✅", label: "Pronto", description: "Seu pedido ficou pronto!" },
+    ENTREGUE: { emoji: "🎉", label: "Entregue", description: "Pedido entregue! Bom apetite!" },
+    CANCELADO: { emoji: "❌", label: "Cancelado", description: "Este pedido foi cancelado" },
   };
   
   return statusMap[status] || { emoji: "❓", label: status, description: "Status desconhecido" };
@@ -326,9 +418,8 @@ async function createOrder(
     return null;
   }
 
-  // Criar itens do pedido
   const items = context.cart.map((item) => ({
-    order_id: order.order_number, // Isso está errado, precisa do ID
+    order_id: order.order_number,
     product_id: item.productId,
     product_name: item.productName,
     quantity: item.quantity,
@@ -336,7 +427,6 @@ async function createOrder(
     total_price: item.price * item.quantity,
   }));
 
-  // Buscar o ID real do pedido
   const { data: orderData } = await supabase
     .from("orders")
     .select("id")
@@ -366,7 +456,6 @@ function isStatusQuery(message: string): boolean {
 
 // Extrai número do pedido da mensagem
 function extractOrderNumber(message: string): number | null {
-  // Procura padrões como "pedido 123", "#123", "número 123", etc
   const patterns = [
     /pedido\s*#?\s*(\d+)/i,
     /#\s*(\d+)/,
@@ -384,6 +473,26 @@ function extractOrderNumber(message: string): number | null {
   return null;
 }
 
+// Mensagens de transição naturais
+const naturalPhrases = {
+  thinking: ["Um momento...", "Deixa eu ver aqui...", "Só um instante..."],
+  understood: ["Entendi!", "Certo!", "Beleza!", "Perfeito!"],
+  thanks: ["Obrigado!", "Valeu!", "Agradeço!"],
+  confirmation: ["Anotado!", "Feito!", "Pode deixar!"],
+};
+
+function getRandomPhrase(type: keyof typeof naturalPhrases): string {
+  const phrases = naturalPhrases[type];
+  return phrases[Math.floor(Math.random() * phrases.length)];
+}
+
+// Resultado do processamento pode ter múltiplas mensagens
+interface ProcessResult {
+  newState: ConversationState;
+  messages: string[];
+  newContext: ConversationContext;
+}
+
 // Processa mensagem baseado no estado
 async function processMessage(
   supabase: ReturnType<typeof getSupabase>,
@@ -391,26 +500,29 @@ async function processMessage(
   message: string,
   state: ConversationState,
   context: ConversationContext
-): Promise<{ newState: ConversationState; response: string; newContext: ConversationContext }> {
+): Promise<ProcessResult> {
   const msgLower = message.toLowerCase().trim();
   let newContext = { ...context };
+  const greeting = getTimeGreeting();
 
   // Comandos globais
-  if (["cancelar", "sair", "voltar ao inicio", "reiniciar"].includes(msgLower)) {
+  if (["cancelar", "sair", "voltar ao inicio", "reiniciar", "inicio", "início"].includes(msgLower)) {
     newContext = { cart: [] };
     return {
       newState: "WELCOME",
-      response:
-        "🔄 *Conversa reiniciada!*\n\nOlá! Bem-vindo à nossa lanchonete! 🍔\n\nDigite *CARDÁPIO* para ver nossos produtos.",
+      messages: [
+        "🔄 Sem problemas! Vamos recomeçar.",
+        `${greeting}! Que bom ter você aqui! 🍔\n\nO que gostaria de fazer?\n\n*1* - 📋 Ver cardápio\n*2* - 🔥 Ver promoções\n*3* - 📦 Acompanhar pedido`
+      ],
       newContext,
     };
   }
 
-  if (["carrinho", "ver carrinho"].includes(msgLower)) {
+  if (["carrinho", "ver carrinho", "meu carrinho"].includes(msgLower)) {
     if (newContext.cart.length === 0) {
       return {
         newState: state,
-        response: "🛒 Seu carrinho está vazio!\n\nDigite *CARDÁPIO* para ver nossos produtos.",
+        messages: ["🛒 Seu carrinho está vazio ainda!\n\nDigite *CARDÁPIO* para ver nossos deliciosos produtos."],
         newContext,
       };
     }
@@ -420,19 +532,25 @@ async function processMessage(
     const total = newContext.cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
     return {
       newState: "CART",
-      response: `🛒 *Seu Carrinho:*\n\n${cartList}\n\n💰 *Total: ${formatPrice(total)}*\n\nDigite:\n*FINALIZAR* - para fazer o pedido\n*LIMPAR* - para esvaziar o carrinho\n*CARDÁPIO* - para adicionar mais itens`,
+      messages: [
+        `🛒 *Seu Carrinho*\n\n${cartList}\n\n💰 *Total: ${formatPrice(total)}*`,
+        "O que deseja fazer?\n\n*FINALIZAR* - Fechar pedido\n*LIMPAR* - Esvaziar carrinho\n*CARDÁPIO* - Adicionar mais itens"
+      ],
       newContext,
     };
   }
 
-  // Comando global para consultar status (funciona em qualquer estado)
+  // Comando global para consultar status
   if (isStatusQuery(message)) {
     const orders = await getCustomerOrders(supabase, phone);
     
     if (orders.length === 0) {
       return {
         newState: state,
-        response: "📭 Você não possui pedidos em andamento no momento.\n\nDigite *CARDÁPIO* para fazer um novo pedido!",
+        messages: [
+          "📭 Você não tem pedidos em andamento no momento.",
+          "Que tal fazer um pedido? Digite *CARDÁPIO* para começar! 😋"
+        ],
         newContext,
       };
     }
@@ -440,16 +558,18 @@ async function processMessage(
     if (orders.length === 1) {
       const order = orders[0];
       const status = formatOrderStatus(order.status);
-      const orderType = order.order_type === "DELIVERY" ? "🛵 Delivery" : "🏃 Retirada";
+      const orderType = order.order_type === "DELIVERY" ? "🛵 Delivery" : "🏃 Retirada no local";
       
       return {
         newState: state,
-        response: `📦 *STATUS DO PEDIDO #${order.order_number}*\n\n${status.emoji} *${status.label}*\n${status.description}\n\n${orderType}\n💰 Total: ${formatPrice(order.total)}\n\nDigite *CARDÁPIO* para fazer um novo pedido.`,
+        messages: [
+          "📦 Encontrei seu pedido!",
+          `*PEDIDO #${order.order_number}*\n\n${status.emoji} *${status.label}*\n${status.description}\n\n${orderType}\n💰 Total: ${formatPrice(order.total)}`
+        ],
         newContext,
       };
     }
     
-    // Múltiplos pedidos - pede para informar o número
     const ordersList = orders
       .map(o => {
         const status = formatOrderStatus(o.status);
@@ -459,7 +579,10 @@ async function processMessage(
     
     return {
       newState: "AWAITING_ORDER_NUMBER",
-      response: `📦 *SEUS PEDIDOS EM ANDAMENTO*\n\n${ordersList}\n\nDigite o *número do pedido* para ver mais detalhes.\nEx: *${orders[0].order_number}*`,
+      messages: [
+        "📦 Você tem mais de um pedido em andamento:",
+        `${ordersList}\n\nMe diz o *número do pedido* que você quer consultar.`
+      ],
       newContext,
     };
   }
@@ -477,28 +600,119 @@ async function processMessage(
         
         return {
           newState: "WELCOME",
-          response: `📦 *STATUS DO PEDIDO #${order.order_number}*\n\n${status.emoji} *${status.label}*\n${status.description}\n\n${orderType}\n💰 Total: ${formatPrice(order.total)}\n\nDigite *CARDÁPIO* para fazer um novo pedido ou *STATUS* para consultar outro pedido.`,
+          messages: [
+            "Achei! 🔍",
+            `*PEDIDO #${order.order_number}*\n\n${status.emoji} *${status.label}*\n${status.description}\n\n${orderType}\n💰 Total: ${formatPrice(order.total)}`,
+            "Precisa de mais alguma coisa? Digite *CARDÁPIO* ou *STATUS*."
+          ],
           newContext,
         };
       }
       
       return {
         newState: "AWAITING_ORDER_NUMBER",
-        response: `❌ Pedido #${orderNumber} não encontrado.\n\nDigite o número correto do pedido ou *CANCELAR* para voltar.`,
+        messages: [`Hmm, não encontrei o pedido #${orderNumber}. 🤔\n\nConfere o número e tenta de novo, ou digite *CANCELAR* para voltar.`],
         newContext,
       };
     }
     
     return {
       newState: "AWAITING_ORDER_NUMBER",
-      response: "❌ Por favor, informe apenas o *número do pedido*.\nEx: *123* ou *pedido 123*",
+      messages: ["Me diz só o *número do pedido*, por favor. 😊\nExemplo: *123*"],
+      newContext,
+    };
+  }
+
+  // Primeiro contato - mensagem especial de boas-vindas
+  if (state === "FIRST_CONTACT") {
+    newContext.isFirstContact = false;
+    
+    return {
+      newState: "WELCOME",
+      messages: [
+        `${greeting}! 👋`,
+        "Seja muito bem-vindo(a) à nossa lanchonete! 🍔🍟",
+        "É um prazer ter você aqui! Eu sou o assistente virtual e vou te ajudar com seu pedido.",
+        `O que gostaria de fazer?\n\n*1* - 📋 Ver nosso cardápio\n*2* - 🔥 Ver promoções do dia\n*3* - 📦 Acompanhar um pedido`
+      ],
       newContext,
     };
   }
 
   switch (state) {
     case "WELCOME": {
-      if (["cardapio", "cardápio", "menu", "ver menu", "oi", "olá", "ola"].includes(msgLower)) {
+      // Ver promoções
+      if (["2", "promoções", "promocoes", "promo", "promoção", "promocao"].includes(msgLower)) {
+        const promos = await getPromotionProducts(supabase);
+        
+        if (promos.length === 0) {
+          return {
+            newState: "WELCOME",
+            messages: [
+              "😅 Ops! As promoções de hoje ainda não foram atualizadas.",
+              "Mas nosso cardápio completo está disponível! Digite *1* ou *CARDÁPIO* para ver."
+            ],
+            newContext,
+          };
+        }
+        
+        const promoList = promos
+          .map((p, i) => `*${i + 1}* - ${p.name}\n   💰 *${formatPrice(p.price)}*`)
+          .join("\n\n");
+        
+        return {
+          newState: "PROMOTIONS",
+          messages: [
+            "🔥 *PROMOÇÕES DO DIA* 🔥",
+            `Olha só as ofertas especiais:\n\n${promoList}`,
+            "Digite o *número* para adicionar ao carrinho ou *CARDÁPIO* para ver tudo!"
+          ],
+          newContext,
+        };
+      }
+
+      // Acompanhar pedido
+      if (["3", "pedido", "acompanhar", "status"].includes(msgLower)) {
+        const orders = await getCustomerOrders(supabase, phone);
+        
+        if (orders.length === 0) {
+          return {
+            newState: "WELCOME",
+            messages: [
+              "📭 Você ainda não tem pedidos em andamento.",
+              "Vamos fazer um? Digite *1* ou *CARDÁPIO* para começar! 😋"
+            ],
+            newContext,
+          };
+        }
+        
+        if (orders.length === 1) {
+          const order = orders[0];
+          const status = formatOrderStatus(order.status);
+          return {
+            newState: "WELCOME",
+            messages: [
+              `📦 *PEDIDO #${order.order_number}*\n\n${status.emoji} *${status.label}*\n${status.description}`,
+              "Quer fazer um novo pedido? Digite *CARDÁPIO*!"
+            ],
+            newContext,
+          };
+        }
+        
+        const ordersList = orders.map(o => {
+          const status = formatOrderStatus(o.status);
+          return `• *#${o.order_number}* - ${status.emoji} ${status.label}`;
+        }).join("\n");
+        
+        return {
+          newState: "AWAITING_ORDER_NUMBER",
+          messages: [`Seus pedidos:\n\n${ordersList}\n\nQual número você quer consultar?`],
+          newContext,
+        };
+      }
+
+      // Ver cardápio
+      if (["1", "cardapio", "cardápio", "menu", "ver menu", "oi", "olá", "ola", "oie", "eae", "e aí"].includes(msgLower)) {
         const categories = await getCategories(supabase);
         const categoryList = categories
           .map((cat, i) => `*${i + 1}* - ${cat.name}`)
@@ -506,28 +720,98 @@ async function processMessage(
         newContext.selectedCategory = undefined;
         return {
           newState: "MENU",
-          response: `📋 *CARDÁPIO*\n\nEscolha uma categoria:\n\n${categoryList}\n\nDigite o *número* da categoria desejada.`,
+          messages: [
+            "📋 *NOSSO CARDÁPIO*",
+            `Escolha uma categoria:\n\n${categoryList}\n\nDigite o *número* da categoria.`
+          ],
           newContext,
         };
       }
+      
       return {
         newState: "WELCOME",
-        response:
-          "Olá! Bem-vindo à nossa lanchonete! 🍔\n\nDigite *CARDÁPIO* para ver nossos produtos,\n*CARRINHO* para ver seu pedido, ou\n*STATUS* para acompanhar seu pedido.",
+        messages: [
+          `${greeting}! Que bom ter você de volta! 😊`,
+          `O que deseja?\n\n*1* - 📋 Ver cardápio\n*2* - 🔥 Promoções\n*3* - 📦 Meus pedidos`
+        ],
         newContext,
       };
     }
 
-    case "MENU": {
-      // Aceita saudações e mostra o menu novamente
-      if (["oi", "olá", "ola", "oie", "bom dia", "boa tarde", "boa noite", "oi!"].includes(msgLower)) {
+    case "PROMOTIONS": {
+      const promos = await getPromotionProducts(supabase);
+      const index = parseInt(msgLower) - 1;
+
+      if (index >= 0 && index < promos.length) {
+        const product = promos[index];
+        
+        const existingItem = newContext.cart.find((item) => item.productId === product.id);
+        if (existingItem) {
+          existingItem.quantity += 1;
+        } else {
+          newContext.cart.push({
+            productId: product.id,
+            productName: product.name,
+            quantity: 1,
+            price: product.price,
+          });
+        }
+
+        const cartTotal = newContext.cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
+
+        return {
+          newState: "PROMOTIONS",
+          messages: [
+            `✅ *${product.name}* adicionado!`,
+            `🛒 Carrinho: ${newContext.cart.length} item(ns) - ${formatPrice(cartTotal)}\n\nMais alguma coisa?\n\n*CARRINHO* - Ver pedido\n*CARDÁPIO* - Ver tudo\n*FINALIZAR* - Fechar pedido`
+          ],
+          newContext,
+        };
+      }
+
+      if (["cardapio", "cardápio", "menu"].includes(msgLower)) {
         const categories = await getCategories(supabase);
         const categoryList = categories
           .map((cat, i) => `*${i + 1}* - ${cat.name}`)
           .join("\n");
         return {
           newState: "MENU",
-          response: `Olá! 👋 Que bom ter você aqui!\n\n📋 *CARDÁPIO*\n\nEscolha uma categoria:\n\n${categoryList}\n\nDigite o *número* da categoria desejada.`,
+          messages: [`📋 *CARDÁPIO*\n\n${categoryList}\n\nDigite o número da categoria.`],
+          newContext,
+        };
+      }
+
+      if (["finalizar", "fechar"].includes(msgLower)) {
+        if (newContext.cart.length === 0) {
+          return {
+            newState: "PROMOTIONS",
+            messages: ["Seu carrinho está vazio! Escolha um produto primeiro. 😊"],
+            newContext,
+          };
+        }
+        return {
+          newState: "CHECKOUT_NAME",
+          messages: ["Ótima escolha! 🎉", "Me diz seu *nome* para eu anotar no pedido:"],
+          newContext,
+        };
+      }
+
+      return {
+        newState: "PROMOTIONS",
+        messages: ["Não entendi 😅 Digite o *número* do produto ou *CARDÁPIO* para ver mais opções."],
+        newContext,
+      };
+    }
+
+    case "MENU": {
+      if (["oi", "olá", "ola", "oie", "bom dia", "boa tarde", "boa noite"].includes(msgLower)) {
+        const categories = await getCategories(supabase);
+        const categoryList = categories
+          .map((cat, i) => `*${i + 1}* - ${cat.name}`)
+          .join("\n");
+        return {
+          newState: "MENU",
+          messages: [`${greeting}! 👋\n\n📋 *CARDÁPIO*\n\n${categoryList}\n\nDigite o número da categoria.`],
           newContext,
         };
       }
@@ -542,7 +826,7 @@ async function processMessage(
         if (products.length === 0) {
           return {
             newState: "MENU",
-            response: "😕 Esta categoria está vazia. Escolha outra categoria.",
+            messages: ["😕 Esta categoria está vazia no momento. Escolha outra!"],
             newContext,
           };
         }
@@ -558,7 +842,11 @@ async function processMessage(
 
         return {
           newState: "CATEGORY",
-          response: `🍽️ *${category.name.toUpperCase()}*\n\n${productList}\n\nDigite o *número* do produto para adicionar ao carrinho.\n\nOu digite *VOLTAR* para ver outras categorias.`,
+          messages: [
+            `🍽️ *${category.name.toUpperCase()}*`,
+            `${productList}`,
+            "Digite o *número* do produto para adicionar ao carrinho.\n\n*VOLTAR* - Outras categorias"
+          ],
           newContext,
         };
       }
@@ -566,36 +854,34 @@ async function processMessage(
       if (msgLower === "voltar") {
         return {
           newState: "WELCOME",
-          response: "Digite *CARDÁPIO* para ver nossos produtos.",
+          messages: [`O que deseja?\n\n*1* - 📋 Cardápio\n*2* - 🔥 Promoções\n*3* - 📦 Meus pedidos`],
           newContext,
         };
       }
 
-      // Mensagem de ajuda mais amigável
       const categoriesForHelp = await getCategories(supabase);
       const categoryListHelp = categoriesForHelp
         .map((cat, i) => `*${i + 1}* - ${cat.name}`)
         .join("\n");
       return {
         newState: "MENU",
-        response: `Não entendi 😅\n\n📋 *CARDÁPIO*\n\n${categoryListHelp}\n\nDigite o *número* da categoria (ex: *1* para ${categoriesForHelp[0]?.name || "Lanches"})`,
+        messages: [`Não entendi 😅\n\nDigite o *número* da categoria:\n\n${categoryListHelp}`],
         newContext,
       };
     }
 
     case "CATEGORY": {
-      // Aceita finalizar direto do estado de categoria
       if (["finalizar", "fechar", "concluir"].includes(msgLower)) {
         if (newContext.cart.length === 0) {
           return {
             newState: "CATEGORY",
-            response: "🛒 Seu carrinho está vazio! Adicione produtos primeiro.\n\nDigite o *número* do produto desejado.",
+            messages: ["🛒 Carrinho vazio! Adicione produtos primeiro.\n\nDigite o *número* do produto."],
             newContext,
           };
         }
         return {
           newState: "CHECKOUT_NAME",
-          response: "👤 *DADOS DO PEDIDO*\n\nQual é o seu *nome*?",
+          messages: ["Perfeito! Vamos finalizar seu pedido. 🎉", "Me diz seu *nome*:"],
           newContext,
         };
       }
@@ -607,17 +893,16 @@ async function processMessage(
           .join("\n");
         return {
           newState: "MENU",
-          response: `📋 *CARDÁPIO*\n\nEscolha uma categoria:\n\n${categoryList}`,
+          messages: [`📋 *CARDÁPIO*\n\n${categoryList}`],
           newContext,
         };
       }
 
-      // Aceita ver carrinho
       if (["carrinho", "ver carrinho"].includes(msgLower)) {
         if (newContext.cart.length === 0) {
           return {
             newState: "CATEGORY",
-            response: "🛒 Seu carrinho está vazio!\n\nDigite o *número* do produto para adicionar.",
+            messages: ["🛒 Carrinho vazio ainda!\n\nDigite o *número* do produto para adicionar."],
             newContext,
           };
         }
@@ -627,7 +912,10 @@ async function processMessage(
         const total = newContext.cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
         return {
           newState: "CART",
-          response: `🛒 *Seu Carrinho:*\n\n${cartList}\n\n💰 *Total: ${formatPrice(total)}*\n\nDigite:\n*FINALIZAR* - para fazer o pedido\n*LIMPAR* - para esvaziar o carrinho\n*CARDÁPIO* - para adicionar mais itens`,
+          messages: [
+            `🛒 *Seu Carrinho*\n\n${cartList}\n\n💰 *Total: ${formatPrice(total)}*`,
+            "*FINALIZAR* - Fechar pedido\n*LIMPAR* - Esvaziar\n*CARDÁPIO* - Adicionar mais"
+          ],
           newContext,
         };
       }
@@ -638,7 +926,6 @@ async function processMessage(
       if (index >= 0 && index < products.length) {
         const product = products[index];
 
-        // Adiciona ao carrinho
         const existingItem = newContext.cart.find((item) => item.productId === product.id);
         if (existingItem) {
           existingItem.quantity += 1;
@@ -655,22 +942,24 @@ async function processMessage(
 
         return {
           newState: "CATEGORY",
-          response: `✅ *${product.name}* adicionado ao carrinho!\n\n🛒 Carrinho: ${newContext.cart.length} item(ns) - ${formatPrice(cartTotal)}\n\nDigite outro *número* para adicionar mais,\n*CARRINHO* para ver seu pedido,\n*VOLTAR* para outras categorias, ou\n*FINALIZAR* para concluir.`,
+          messages: [
+            `✅ *${product.name}* adicionado!`,
+            `🛒 ${newContext.cart.length} item(ns) - ${formatPrice(cartTotal)}\n\nMais algum? Digite o número!\n\n*VOLTAR* - Outras categorias\n*FINALIZAR* - Fechar pedido`
+          ],
           newContext,
         };
       }
 
-      // Mostra produtos novamente se não entendeu
       const productList = products
         .map(
           (p, i) =>
-            `*${i + 1}* - ${p.name}\n   ${p.description || ""}\n   💰 ${formatPrice(p.price)}`
+            `*${i + 1}* - ${p.name} - ${formatPrice(p.price)}`
         )
-        .join("\n\n");
+        .join("\n");
       
       return {
         newState: "CATEGORY",
-        response: `Não entendi 😅\n\nDigite o *número* do produto:\n\n${productList}\n\nOu digite *VOLTAR* para ver outras categorias.`,
+        messages: [`Não entendi 😅\n\nDigite o *número*:\n\n${productList}`],
         newContext,
       };
     }
@@ -680,7 +969,7 @@ async function processMessage(
         newContext.cart = [];
         return {
           newState: "WELCOME",
-          response: "🗑️ Carrinho esvaziado!\n\nDigite *CARDÁPIO* para ver nossos produtos.",
+          messages: ["🗑️ Carrinho esvaziado!", "Digite *CARDÁPIO* quando quiser fazer um novo pedido."],
           newContext,
         };
       }
@@ -689,13 +978,13 @@ async function processMessage(
         if (newContext.cart.length === 0) {
           return {
             newState: "WELCOME",
-            response: "🛒 Seu carrinho está vazio! Digite *CARDÁPIO* para adicionar produtos.",
+            messages: ["🛒 Carrinho vazio! Digite *CARDÁPIO* para adicionar produtos."],
             newContext,
           };
         }
         return {
           newState: "CHECKOUT_NAME",
-          response: "👤 *DADOS DO PEDIDO*\n\nQual é o seu *nome*?",
+          messages: ["Ótimo! Vamos fechar seu pedido. 🎉", "Qual seu *nome*?"],
           newContext,
         };
       }
@@ -707,15 +996,14 @@ async function processMessage(
           .join("\n");
         return {
           newState: "MENU",
-          response: `📋 *CARDÁPIO*\n\nEscolha uma categoria:\n\n${categoryList}`,
+          messages: [`📋 *CARDÁPIO*\n\n${categoryList}`],
           newContext,
         };
       }
 
       return {
         newState: "CART",
-        response:
-          "Digite:\n*FINALIZAR* - para fazer o pedido\n*LIMPAR* - para esvaziar\n*CARDÁPIO* - para adicionar mais",
+        messages: ["O que deseja?\n\n*FINALIZAR* - Fechar pedido\n*LIMPAR* - Esvaziar\n*CARDÁPIO* - Adicionar mais"],
         newContext,
       };
     }
@@ -724,7 +1012,7 @@ async function processMessage(
       if (message.trim().length < 2) {
         return {
           newState: "CHECKOUT_NAME",
-          response: "❌ Nome inválido. Por favor, informe seu nome completo.",
+          messages: ["Preciso do seu nome completo para anotar no pedido. 😊"],
           newContext,
         };
       }
@@ -733,34 +1021,42 @@ async function processMessage(
 
       return {
         newState: "CHECKOUT_TYPE",
-        response: `Olá, *${newContext.customerName}*! 👋\n\nComo deseja receber seu pedido?\n\n*1* - 🏃 Retirar no local\n*2* - 🛵 Delivery (+${formatPrice(5)})`,
+        messages: [
+          `Prazer, *${newContext.customerName}*! 👋`,
+          `Como você quer receber?\n\n*1* - 🏃 Retirar no balcão\n*2* - 🛵 Delivery (+${formatPrice(5)})`
+        ],
         newContext,
       };
     }
 
     case "CHECKOUT_TYPE": {
-      if (msgLower === "1") {
+      if (msgLower === "1" || msgLower.includes("retirar") || msgLower.includes("balcão")) {
         newContext.orderType = "PRESENCIAL";
         return {
           newState: "CHECKOUT_PAYMENT",
-          response:
-            "💳 *FORMA DE PAGAMENTO*\n\n*1* - 💵 Dinheiro\n*2* - 📱 PIX\n*3* - 💳 Cartão",
+          messages: [
+            getRandomPhrase("understood"),
+            "💳 Como vai pagar?\n\n*1* - 💵 Dinheiro\n*2* - 📱 PIX\n*3* - 💳 Cartão"
+          ],
           newContext,
         };
       }
 
-      if (msgLower === "2") {
+      if (msgLower === "2" || msgLower.includes("delivery") || msgLower.includes("entrega")) {
         newContext.orderType = "DELIVERY";
         return {
           newState: "CHECKOUT_ADDRESS",
-          response: "📍 *ENDEREÇO DE ENTREGA*\n\nInforme seu endereço completo:\n(Rua, número, bairro, complemento)",
+          messages: [
+            "🛵 Delivery, então!",
+            "Me passa o *endereço completo* para entrega:\n(Rua, número, bairro e complemento)"
+          ],
           newContext,
         };
       }
 
       return {
         newState: "CHECKOUT_TYPE",
-        response: "❌ Opção inválida.\n\n*1* - Retirar no local\n*2* - Delivery",
+        messages: ["Digite *1* para retirar ou *2* para delivery."],
         newContext,
       };
     }
@@ -769,7 +1065,7 @@ async function processMessage(
       if (message.trim().length < 10) {
         return {
           newState: "CHECKOUT_ADDRESS",
-          response: "❌ Endereço muito curto. Informe o endereço completo.",
+          messages: ["Preciso do endereço completo para não errar a entrega! 📍\n\nExemplo: Rua das Flores, 123, Centro, apto 101"],
           newContext,
         };
       }
@@ -778,8 +1074,10 @@ async function processMessage(
 
       return {
         newState: "CHECKOUT_PAYMENT",
-        response:
-          "💳 *FORMA DE PAGAMENTO*\n\n*1* - 💵 Dinheiro\n*2* - 📱 PIX\n*3* - 💳 Cartão",
+        messages: [
+          `📍 ${getRandomPhrase("confirmation")}`,
+          "💳 Como vai pagar?\n\n*1* - 💵 Dinheiro\n*2* - 📱 PIX\n*3* - 💳 Cartão"
+        ],
         newContext,
       };
     }
@@ -789,19 +1087,24 @@ async function processMessage(
         "1": "DINHEIRO",
         "2": "PIX",
         "3": "CARTAO",
+        "dinheiro": "DINHEIRO",
+        "pix": "PIX",
+        "cartao": "CARTAO",
+        "cartão": "CARTAO",
       };
 
-      if (!paymentMap[msgLower]) {
+      const paymentKey = Object.keys(paymentMap).find(k => msgLower.includes(k) || msgLower === k);
+      
+      if (!paymentKey) {
         return {
           newState: "CHECKOUT_PAYMENT",
-          response: "❌ Opção inválida.\n\n*1* - Dinheiro\n*2* - PIX\n*3* - Cartão",
+          messages: ["Digite *1* (Dinheiro), *2* (PIX) ou *3* (Cartão)."],
           newContext,
         };
       }
 
-      newContext.paymentMethod = paymentMap[msgLower];
+      newContext.paymentMethod = paymentMap[paymentKey];
 
-      // Monta resumo
       const cartList = newContext.cart
         .map((item) => `• ${item.quantity}x ${item.productName} - ${formatPrice(item.price * item.quantity)}`)
         .join("\n");
@@ -809,50 +1112,59 @@ async function processMessage(
       const deliveryFee = newContext.orderType === "DELIVERY" ? 5 : 0;
       const total = subtotal + deliveryFee;
 
-      const paymentLabels = { DINHEIRO: "Dinheiro", PIX: "PIX", CARTAO: "Cartão" };
+      const paymentLabels = { DINHEIRO: "💵 Dinheiro", PIX: "📱 PIX", CARTAO: "💳 Cartão" };
 
       return {
         newState: "CONFIRM",
-        response: `📝 *CONFIRME SEU PEDIDO*\n\n👤 ${newContext.customerName}\n📍 ${newContext.orderType === "DELIVERY" ? newContext.deliveryAddress : "Retirada no local"}\n💳 ${paymentLabels[newContext.paymentMethod]}\n\n🛒 *Itens:*\n${cartList}\n\n💰 Subtotal: ${formatPrice(subtotal)}${deliveryFee > 0 ? `\n🛵 Entrega: ${formatPrice(deliveryFee)}` : ""}\n\n💵 *TOTAL: ${formatPrice(total)}*\n\nDigite *CONFIRMAR* para finalizar ou *CANCELAR* para desistir.`,
+        messages: [
+          "📝 *RESUMO DO PEDIDO*",
+          `👤 *${newContext.customerName}*\n📍 ${newContext.orderType === "DELIVERY" ? newContext.deliveryAddress : "Retirada no local"}\n💳 ${paymentLabels[newContext.paymentMethod]}\n\n🛒 *Itens:*\n${cartList}\n\n💰 Subtotal: ${formatPrice(subtotal)}${deliveryFee > 0 ? `\n🛵 Entrega: ${formatPrice(deliveryFee)}` : ""}\n\n💵 *TOTAL: ${formatPrice(total)}*`,
+          "Tudo certo? Digite *CONFIRMAR* para finalizar!"
+        ],
         newContext,
       };
     }
 
     case "CONFIRM": {
-      if (["confirmar", "sim", "ok", "confirma"].includes(msgLower)) {
+      if (["confirmar", "sim", "ok", "confirma", "isso", "pode"].includes(msgLower)) {
         const orderNumber = await createOrder(supabase, newContext, phone);
 
         if (!orderNumber) {
           return {
             newState: "CONFIRM",
-            response:
-              "❌ Erro ao processar pedido. Tente novamente digitando *CONFIRMAR*.",
+            messages: ["😥 Ops! Tive um probleminha. Tenta digitar *CONFIRMAR* de novo?"],
             newContext,
           };
         }
 
-        // Limpa contexto
         newContext = { cart: [] };
 
         return {
           newState: "WELCOME",
-          response: `✅ *PEDIDO CONFIRMADO!*\n\n🎉 Seu pedido *#${orderNumber}* foi recebido!\n\nEstamos preparando com carinho. Você receberá atualizações sobre o status.\n\n💡 *Dica:* Digite *STATUS* a qualquer momento para acompanhar seu pedido!\n\nObrigado pela preferência! 💛\n\nDigite *CARDÁPIO* para fazer um novo pedido.`,
+          messages: [
+            "✅ *PEDIDO CONFIRMADO!*",
+            `🎉 Seu pedido *#${orderNumber}* foi recebido!`,
+            "Estamos preparando com todo carinho. Você vai receber atualizações por aqui! 💛",
+            "Obrigado pela preferência! Digite *CARDÁPIO* para novo pedido ou *STATUS* para acompanhar."
+          ],
           newContext,
         };
       }
 
-      if (["cancelar", "nao", "não"].includes(msgLower)) {
+      if (["cancelar", "nao", "não", "desistir"].includes(msgLower)) {
         return {
           newState: "CART",
-          response:
-            "❌ Pedido cancelado.\n\nSeu carrinho ainda está salvo. Digite *CARRINHO* para ver ou *LIMPAR* para esvaziar.",
+          messages: [
+            "Tudo bem, sem problemas! 😊",
+            "Seu carrinho continua salvo. Digite *CARRINHO* para ver ou *LIMPAR* para esvaziar."
+          ],
           newContext,
         };
       }
 
       return {
         newState: "CONFIRM",
-        response: "Digite *CONFIRMAR* para finalizar ou *CANCELAR* para desistir.",
+        messages: ["Digite *CONFIRMAR* para finalizar ou *CANCELAR* para voltar."],
         newContext,
       };
     }
@@ -860,7 +1172,7 @@ async function processMessage(
     default:
       return {
         newState: "WELCOME",
-        response: "Olá! Digite *CARDÁPIO* para ver nossos produtos.",
+        messages: [`${greeting}! Digite *CARDÁPIO* para ver nossos produtos. 😊`],
         newContext: { cart: [] },
       };
   }
@@ -868,7 +1180,6 @@ async function processMessage(
 
 // Handler principal
 Deno.serve(async (req) => {
-  // CORS preflight
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
@@ -877,38 +1188,30 @@ Deno.serve(async (req) => {
     const body = await req.json();
     console.log("Webhook recebido:", JSON.stringify(body));
 
-    // Formato Evolution API
     const event = body.event;
     const data = body.data;
 
-    // Ignora eventos que não são mensagens recebidas
     if (event !== "messages.upsert") {
       return new Response(JSON.stringify({ status: "ignored" }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    // Extrai mensagem - suporta texto normal, texto estendido e resposta de botões
     const phone = data.key?.remoteJid?.replace("@s.whatsapp.net", "") || "";
     let message = "";
     
-    // Mensagem de texto normal
     if (data.message?.conversation) {
       message = data.message.conversation;
     }
-    // Texto estendido (citação, etc)
     else if (data.message?.extendedTextMessage?.text) {
       message = data.message.extendedTextMessage.text;
     }
-    // Resposta de botão
     else if (data.message?.buttonsResponseMessage?.selectedButtonId) {
       message = data.message.buttonsResponseMessage.selectedButtonId;
     }
-    // Template button response
     else if (data.message?.templateButtonReplyMessage?.selectedId) {
       message = data.message.templateButtonReplyMessage.selectedId;
     }
-    // Lista interativa
     else if (data.message?.listResponseMessage?.singleSelectReply?.selectedRowId) {
       message = data.message.listResponseMessage.singleSelectReply.selectedRowId;
     }
@@ -922,12 +1225,9 @@ Deno.serve(async (req) => {
     console.log(`Mensagem de ${phone}: ${message}`);
 
     const supabase = getSupabase();
+    const { state, context, isNew } = await getOrCreateSession(supabase, phone);
 
-    // Busca sessão atual
-    const { state, context } = await getOrCreateSession(supabase, phone);
-
-    // Processa mensagem
-    const { newState, response, newContext } = await processMessage(
+    const { newState, messages, newContext } = await processMessage(
       supabase,
       phone,
       message,
@@ -935,13 +1235,12 @@ Deno.serve(async (req) => {
       context
     );
 
-    // Atualiza sessão
     await updateSession(supabase, phone, newState, newContext);
 
-    // Envia resposta
-    await sendWhatsAppMessage(phone, response);
+    // Envia múltiplas mensagens com delays naturais
+    await sendMultipleMessages(phone, messages);
 
-    // Notifica n8n se configurado (opcional)
+    // Notifica n8n se configurado
     const n8nUrl = Deno.env.get("N8N_WEBHOOK_URL");
     if (n8nUrl) {
       try {
@@ -953,7 +1252,7 @@ Deno.serve(async (req) => {
             message,
             state: newState,
             context: newContext,
-            response,
+            response: messages.join("\n\n"),
           }),
         });
       } catch (e) {
