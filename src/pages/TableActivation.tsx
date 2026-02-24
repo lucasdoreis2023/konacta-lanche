@@ -98,6 +98,12 @@ export default function TableActivation() {
         return;
       }
 
+      // Mark table as occupied
+      await supabase
+        .from('tables')
+        .update({ occupied_since: new Date().toISOString() })
+        .eq('table_number', num);
+
       toast.success(`Mesa ${num} ativada!`);
       navigate(`/?mesa=${num}`);
     } catch (err) {
