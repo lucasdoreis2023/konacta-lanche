@@ -23,6 +23,7 @@ export default function Checkout() {
     customerPhone: '',
     orderType: 'PRESENCIAL' as OrderType,
     deliveryAddress: '',
+    tableNumber: '',
     paymentMethod: 'DINHEIRO' as PaymentMethod,
     notes: '',
   });
@@ -55,6 +56,11 @@ export default function Checkout() {
       return;
     }
 
+    if (formData.orderType === 'PRESENCIAL' && !formData.tableNumber.trim()) {
+      toast.error('Informe o número da mesa');
+      return;
+    }
+
     setIsSubmitting(true);
 
     try {
@@ -67,6 +73,7 @@ export default function Checkout() {
           customer_name: formData.customerName.trim(),
           customer_phone: formData.customerPhone.trim() || null,
           delivery_address: formData.orderType === 'DELIVERY' ? formData.deliveryAddress.trim() : null,
+          table_number: formData.orderType === 'PRESENCIAL' ? parseInt(formData.tableNumber) : null,
           payment_method: formData.paymentMethod,
           subtotal: total,
           delivery_fee: deliveryFee,
@@ -175,7 +182,7 @@ export default function Checkout() {
                 >
                   <div className="flex items-center space-x-2">
                     <RadioGroupItem value="PRESENCIAL" id="presencial" />
-                    <Label htmlFor="presencial">Retirar no local</Label>
+                    <Label htmlFor="presencial">Comer no local (mesa)</Label>
                   </div>
                   <div className="flex items-center space-x-2">
                     <RadioGroupItem value="DELIVERY" id="delivery" />
@@ -191,6 +198,21 @@ export default function Checkout() {
                       value={formData.deliveryAddress}
                       onChange={e => setFormData(prev => ({ ...prev, deliveryAddress: e.target.value }))}
                       placeholder="Rua, número, bairro, complemento..."
+                      required
+                    />
+                  </div>
+                )}
+
+                {formData.orderType === 'PRESENCIAL' && (
+                  <div className="mt-4">
+                    <Label htmlFor="tableNumber">Número da Mesa *</Label>
+                    <Input
+                      id="tableNumber"
+                      type="number"
+                      min="1"
+                      value={formData.tableNumber}
+                      onChange={e => setFormData(prev => ({ ...prev, tableNumber: e.target.value }))}
+                      placeholder="Ex: 5"
                       required
                     />
                   </div>
