@@ -788,39 +788,114 @@ async function downloadWhatsAppMedia(messageId: string): Promise<ArrayBuffer | n
   }
 }
 
-// Transcreve áudio usando ElevenLabs
+// Transcreve áudio usando ElevenLabs com fallback para Lovable AI (Gemini)
 async function transcribeAudio(audioBuffer: ArrayBuffer): Promise<string | null> {
+  // Tenta ElevenLabs primeiro
   const ELEVENLABS_API_KEY = Deno.env.get("ELEVENLABS_API_KEY");
   
-  if (!ELEVENLABS_API_KEY) {
-    console.error("ELEVENLABS_API_KEY não configurada");
+  if (ELEVENLABS_API_KEY) {
+    try {
+      const formData = new FormData();
+      const audioBlob = new Blob([audioBuffer], { type: "audio/ogg" });
+      formData.append("file", audioBlob, "audio.ogg");
+      formData.append("model_id", "scribe_v2");
+      formData.append("language_code", "por");
+
+      const response = await fetch("https://api.elevenlabs.io/v1/speech-to-text", {
+        method: "POST",
+        headers: { "xi-api-key": ELEVENLABS_API_KEY },
+        body: formData,
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        if (result.text) {
+          console.log("[STT] ElevenLabs transcrição OK");
+          return result.text;
+        }
+      } else {
+        const errText = await response.text();
+        console.error("Erro ElevenLabs STT:", response.status, errText);
+        // Continua para fallback
+      }
+    } catch (error) {
+      console.error("Erro ElevenLabs STT:", error);
+    }
+  }
+
+  // Fallback: Lovable AI (Gemini) para transcrição
+  console.log("[STT] Usando Lovable AI como fallback para transcrição");
+  return transcribeAudioWithLovableAI(audioBuffer);
+}
+
+// Transcreve áudio usando Lovable AI (Gemini multimodal)
+async function transcribeAudioWithLovableAI(audioBuffer: ArrayBuffer): Promise<string | null> {
+  const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
+  if (!LOVABLE_API_KEY) {
+    console.error("[STT Fallback] LOVABLE_API_KEY não configurada");
     return null;
   }
 
   try {
-    const formData = new FormData();
-    const audioBlob = new Blob([audioBuffer], { type: "audio/ogg" });
-    formData.append("file", audioBlob, "audio.ogg");
-    formData.append("model_id", "scribe_v2");
-    formData.append("language_code", "por"); // Português
+    // Converte áudio para base64
+    const uint8Array = new Uint8Array(audioBuffer);
+    let binary = "";
+    for (let i = 0; i < uint8Array.length; i++) {
+      binary += String.fromCharCode(uint8Array[i]);
+    }
+    const audioBase64 = btoa(binary);
 
-    const response = await fetch("https://api.elevenlabs.io/v1/speech-to-text", {
+    const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
       method: "POST",
       headers: {
-        "xi-api-key": ELEVENLABS_API_KEY,
+        "Authorization": `Bearer ${LOVABLE_API_KEY}`,
+        "Content-Type": "application/json",
       },
-      body: formData,
+      body: JSON.stringify({
+        model: "google/gemini-2.5-flash",
+        messages: [
+          {
+            role: "system",
+            content: "Você é um transcritor de áudio em português brasileiro. Transcreva EXATAMENTE o que a pessoa disse no áudio, sem adicionar nada. Retorne APENAS a transcrição, sem aspas ou explicações."
+          },
+          {
+            role: "user",
+            content: [
+              {
+                type: "input_audio",
+                input_audio: {
+                  data: audioBase64,
+                  format: "ogg"
+                }
+              },
+              {
+                type: "text",
+                text: "Transcreva este áudio em português:"
+              }
+            ]
+          }
+        ],
+        temperature: 0.1,
+        max_tokens: 500
+      }),
     });
 
     if (!response.ok) {
-      console.error("Erro ElevenLabs STT:", response.status, await response.text());
+      console.error("[STT Fallback] Erro Lovable AI:", response.status, await response.text());
       return null;
     }
 
     const result = await response.json();
-    return result.text || null;
+    const transcript = result.choices?.[0]?.message?.content?.trim();
+    
+    if (transcript) {
+      console.log(`[STT Fallback] Transcrição Gemini: "${transcript}"`);
+      return transcript;
+    }
+    
+    return null;
   } catch (error) {
-    console.error("Erro na transcrição:", error);
+    console.error("[STT Fallback] Erro:", error);
     return null;
   }
 }
@@ -1216,27 +1291,30 @@ ${context.conversationSummary}
   const hour = new Date().getHours();
   const timeGreeting = hour >= 5 && hour < 12 ? "Bom dia" : hour >= 12 && hour < 18 ? "Boa tarde" : "Boa noite";
 
-  return `Você é a atendente de uma lanchonete. Seu nome é Ana.
-Fale como uma pessoa real: simpática, acolhedora e direta.
-Nunca pareça um robô ou chatbot. Use gírias leves, emojis com moderação.
+  return `Você é a Ana, atendente da lanchonete. Você é uma pessoa de verdade conversando pelo WhatsApp com um cliente.
+
+IMPORTANTE: Você NÃO é um chatbot, assistente virtual ou IA. Você é a Ana, uma moça simpática que trabalha na lanchonete. Converse como se estivesse no WhatsApp com um amigo que quer pedir comida.
 
 ${conversationSummarySection}────────────────────────
-PERSONA
+COMO VOCÊ FALA (OBRIGATÓRIO)
 ────────────────────────
-- Você é a Ana, atendente real da lanchonete
-- Fale de forma natural como uma pessoa no WhatsApp
-- Use "haha", "rsrs", "😊", "😋" com moderação
-- Seja calorosa mas objetiva
-- Trate o cliente pelo nome quando souber
+- Escreva como uma pessoa real no WhatsApp: informal, acolhedora, com personalidade
+- Use variações naturais: "aaah", "hmmm", "eitaa", "opaaa", "show!", "massa!", "bora!"
+- Emojis com moderação mas de forma natural: 😊 😋 🤤 ❤️ 👏 🔥
+- Quando o cliente pedir algo gostoso, reaja: "boa escolha!", "esse é top!", "hmmm delícia!"
+- NUNCA use linguagem formal como "prezado", "informo que", "conforme solicitado"
+- NUNCA enumere opções com bullets ou listas formatadas
+- NUNCA diga "Como posso te ajudar?" (robótico demais)
+- Use o nome do cliente sempre que souber, de forma natural
+- Varie suas respostas! Nunca repita o mesmo padrão duas vezes seguidas
 
 ────────────────────────
-REGRAS ABSOLUTAS DE RESPOSTA
+REGRAS DE RESPOSTA
 ────────────────────────
-- Gere respostas CURTAS e AUTO-SUFICIENTES
-- Cada resposta deve funcionar sozinha (sem depender de frases anteriores)
-- Nunca gere textos longos ou explicativos
-- Nunca repita a mesma informação em frases diferentes
-- Não use conectivos de continuidade ("então", "agora", "além disso")
+- Respostas CURTAS: máximo 1-2 frases como alguém digitando rápido no WhatsApp
+- Cada resposta funciona sozinha
+- Uma pergunta por vez, no máximo
+- Sem conectivos formais
 
 ────────────────────────
 CONTEXTO DE ENTRADA
@@ -1311,23 +1389,24 @@ a menos que ele peça explicitamente.
 ────────────────────────
 FLUXO DE ATENDIMENTO OBRIGATÓRIO
 ────────────────────────
-${isFirstInteraction ? `**PRIMEIRO CONTATO — SIGA ESTA ORDEM:**
-1. Cumprimente com "${timeGreeting}!" de forma calorosa e natural
-2. Pergunte o nome do cliente (ex: "Como posso te chamar?" ou "Qual seu nome?")
-3. NÃO ofereça cardápio ainda, espere o nome primeiro
+${isFirstInteraction ? `**PRIMEIRO CONTATO:**
+Mande um "${timeGreeting}!" bem caloroso e pergunte o nome de um jeito natural.
+NÃO ofereça cardápio ainda, espere o nome.
 
-Exemplo de primeira resposta:
-"${timeGreeting}! Bem-vindo(a) à nossa lanchonete! 😊 Me diz, qual seu nome?"` :
-!hasName ? `**NOME AINDA NÃO INFORMADO:**
-1. Pergunte o nome do cliente antes de prosseguir
-2. Use set_name quando o cliente informar` :
-`**FLUXO NORMAL (nome já conhecido: ${context.customerName}):**
-1. Produto mencionado → add_to_cart
-2. Após adicionar → pergunte se quer mais algo
-3. Finalizar → entrega ou retirada
-4. Entrega → peça endereço
-5. Pagamento → set_payment
-6. Dados completos → confirm_order`}
+Exemplos (varie, não repita sempre igual):
+- "${timeGreeting}! Tudo bem? 😊 Me diz teu nome que já te atendo!"
+- "Oiii! ${timeGreeting}! Como posso te chamar? 😄"
+- "${timeGreeting}!! Seja bem-vindo(a)! Qual seu nome? 🤗"` :
+!hasName ? `**PRECISA DO NOME:**
+Pergunte o nome de forma natural antes de continuar.
+Use set_name quando souber.` :
+`**ATENDIMENTO NORMAL (cliente: ${context.customerName}):**
+Produto mencionado → add_to_cart e reaja com empolgação
+Após adicionar → pergunte se quer mais de forma casual
+Finalizar → pergunta entrega ou retirada
+Entrega → pede endereço
+Pagamento → set_payment
+Tudo preenchido → confirm_order`}
 
 ────────────────────────
 MODO REVISÃO
