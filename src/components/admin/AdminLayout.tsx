@@ -16,6 +16,7 @@ import {
   Settings,
   Menu,
   X,
+  Armchair,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useState } from 'react';
@@ -25,6 +26,7 @@ const navItems = [
   { path: '/admin/categories', label: 'Categorias', icon: FolderTree },
   { path: '/admin/products', label: 'Produtos', icon: Package },
   { path: '/admin/orders', label: 'Pedidos', icon: ClipboardList },
+  { path: '/admin/tables', label: 'Mesas', icon: Armchair },
   { path: '/admin/reports', label: 'Relatórios', icon: BarChart3 },
   { path: '/admin/users', label: 'Usuários', icon: Users },
   { path: '/admin/settings', label: 'Configurações', icon: Settings },
