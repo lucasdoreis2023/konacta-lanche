@@ -1,4 +1,5 @@
 import { useState, useMemo } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { Header } from '@/components/layout/Header';
 import { HeroCarousel } from '@/components/home/HeroCarousel';
 import { PromoBanners } from '@/components/home/PromoBanners';
@@ -8,8 +9,11 @@ import { ProductGrid } from '@/components/menu/ProductGrid';
 import { WhatsAppFloatingButton } from '@/components/WhatsAppFloatingButton';
 import { useCategories } from '@/hooks/useCategories';
 import { useProducts } from '@/hooks/useProducts';
+import { UtensilsCrossed } from 'lucide-react';
 
 export default function Menu() {
+  const [searchParams] = useSearchParams();
+  const mesaParam = searchParams.get('mesa');
   const [selectedCategory, setSelectedCategory] = useState('all');
   const { data: categories, isLoading: categoriesLoading } = useCategories();
   const { data: products, isLoading: productsLoading } = useProducts();
@@ -28,6 +32,18 @@ export default function Menu() {
       <HeroCarousel />
 
       <main className="container mx-auto px-4 py-6">
+        {mesaParam && (
+          <div className="mb-4 flex items-center gap-2 rounded-lg border border-primary/20 bg-primary/5 px-4 py-3">
+            <UtensilsCrossed className="h-5 w-5 text-primary" />
+            <span className="font-medium text-primary">
+              Mesa {mesaParam}
+            </span>
+            <span className="text-sm text-muted-foreground">
+              — seus pedidos serão enviados para esta mesa
+            </span>
+          </div>
+        )}
+
         {/* Promo Banners */}
         <PromoBanners />
 
