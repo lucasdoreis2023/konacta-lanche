@@ -8,12 +8,14 @@ import {
 import { Button } from '@/components/ui/button';
 import { ShoppingCart, Trash2, Plus, Minus, ShoppingBag } from 'lucide-react';
 import { useCart } from '@/contexts/CartContext';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Badge } from '@/components/ui/badge';
 
 export function CartSheet() {
   const { items, itemCount, total, updateQuantity, removeItem, clearCart } = useCart();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const mesaParam = searchParams.get('mesa');
 
   const formatPrice = (price: number) => {
     return new Intl.NumberFormat('pt-BR', {
@@ -134,7 +136,7 @@ export function CartSheet() {
               <Button
                 className="w-full brand-gradient border-0 text-white font-bold shadow-lg hover:opacity-90"
                 size="lg"
-                onClick={() => navigate('/checkout')}
+                onClick={() => navigate(mesaParam ? `/checkout?mesa=${mesaParam}` : '/checkout')}
               >
                 Finalizar Pedido
               </Button>

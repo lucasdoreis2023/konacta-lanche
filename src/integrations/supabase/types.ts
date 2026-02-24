@@ -277,6 +277,33 @@ export type Database = {
         }
         Relationships: []
       }
+      tables: {
+        Row: {
+          active: boolean
+          created_at: string | null
+          id: string
+          password: string
+          table_number: number
+          updated_at: string | null
+        }
+        Insert: {
+          active?: boolean
+          created_at?: string | null
+          id?: string
+          password?: string
+          table_number: number
+          updated_at?: string | null
+        }
+        Update: {
+          active?: boolean
+          created_at?: string | null
+          id?: string
+          password?: string
+          table_number?: number
+          updated_at?: string | null
+        }
+        Relationships: []
+      }
       user_roles: {
         Row: {
           id: string
