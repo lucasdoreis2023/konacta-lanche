@@ -181,15 +181,18 @@ export default function Checkout() {
                 <RadioGroup
                   value={formData.orderType}
                   onValueChange={(value: OrderType) => setFormData(prev => ({ ...prev, orderType: value }))}
+                  disabled={!!mesaParam}
                 >
                   <div className="flex items-center space-x-2">
                     <RadioGroupItem value="PRESENCIAL" id="presencial" />
                     <Label htmlFor="presencial">Comer no local (mesa)</Label>
                   </div>
-                  <div className="flex items-center space-x-2">
-                    <RadioGroupItem value="DELIVERY" id="delivery" />
-                    <Label htmlFor="delivery">Delivery (+{formatPrice(5)})</Label>
-                  </div>
+                  {!mesaParam && (
+                    <div className="flex items-center space-x-2">
+                      <RadioGroupItem value="DELIVERY" id="delivery" />
+                      <Label htmlFor="delivery">Delivery (+{formatPrice(5)})</Label>
+                    </div>
+                  )}
                 </RadioGroup>
 
                 {formData.orderType === 'DELIVERY' && (
@@ -216,7 +219,11 @@ export default function Checkout() {
                       onChange={e => setFormData(prev => ({ ...prev, tableNumber: e.target.value }))}
                       placeholder="Ex: 5"
                       required
+                      disabled={!!mesaParam}
                     />
+                    {mesaParam && (
+                      <p className="text-xs text-muted-foreground mt-1">Mesa definida automaticamente</p>
+                    )}
                   </div>
                 )}
               </CardContent>
