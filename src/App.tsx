@@ -18,6 +18,7 @@ import AdminUsers from "./pages/admin/AdminUsers";
 import AdminSettings from "./pages/admin/AdminSettings";
 import AdminTables from "./pages/admin/AdminTables";
 import TableActivation from "./pages/TableActivation";
+import TableBill from "./pages/TableBill";
 import { AdminGuard } from "./components/admin/AdminGuard";
 import NotFound from "./pages/NotFound";
 
@@ -35,6 +36,7 @@ const App = () => (
             <Route path="/checkout" element={<Checkout />} />
             <Route path="/order-success" element={<OrderSuccess />} />
             <Route path="/mesa/:tableNumber" element={<TableActivation />} />
+            <Route path="/conta-mesa/:tableNumber" element={<TableBill />} />
             <Route path="/kds" element={<KDS />} />
             <Route path="/admin/login" element={<AdminLogin />} />
             <Route path="/admin" element={<AdminGuard><AdminDashboard /></AdminGuard>} />
