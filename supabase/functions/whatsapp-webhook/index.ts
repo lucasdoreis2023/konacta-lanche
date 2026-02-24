@@ -221,10 +221,26 @@ function applyDeterministicCheckoutExtraction(message: string, context: Conversa
     context.customerName = raw.trim();
   }
 
-  // Tipo (entrega/retirada)
+  // Tipo (entrega/retirada/mesa)
   if (!context.orderType) {
     if (/\b(entrega|delivery)\b/.test(msg)) context.orderType = "DELIVERY";
-    if (/\b(retirada|retirar|buscar|busca|presencial)\b/.test(msg)) context.orderType = "PRESENCIAL";
+    if (/\b(retirada|retirar|buscar|busca)\b/.test(msg)) context.orderType = "PRESENCIAL";
+    if (/\b(mesa|presencial|comer aqui|no local|sentado)\b/.test(msg)) {
+      context.orderType = "PRESENCIAL";
+      // Tenta extrair número da mesa
+      const mesaMatch = msg.match(/\bmesa\s*(\d+)\b/);
+      if (mesaMatch) {
+        context.tableNumber = parseInt(mesaMatch[1]);
+      }
+    }
+  }
+
+  // Número da mesa (se já é presencial mas falta o número)
+  if (context.orderType === "PRESENCIAL" && !context.tableNumber) {
+    const mesaMatch = msg.match(/\b(?:mesa\s*)?(\d{1,3})\b/);
+    if (mesaMatch && msg.includes("mesa")) {
+      context.tableNumber = parseInt(mesaMatch[1]);
+    }
   }
 
   // Pagamento
@@ -255,6 +271,7 @@ interface ConversationContext {
   selectedCategory?: string;
   customerName?: string;
   orderType?: "PRESENCIAL" | "DELIVERY";
+  tableNumber?: number;
   deliveryAddress?: string;
   paymentMethod?: "PIX" | "CARTAO" | "DINHEIRO";
   isFirstContact?: boolean;
@@ -1266,8 +1283,9 @@ function getAttendantSystemPrompt(products: Product[], context: ConversationCont
   const missingData: string[] = [];
   if (cart.length === 0) missingData.push("ITENS DO PEDIDO");
   if (!isValidCustomerName(context?.customerName)) missingData.push("NOME");
-  if (!context?.orderType) missingData.push("TIPO (entrega ou retirada)");
+  if (!context?.orderType) missingData.push("TIPO (entrega, retirada ou mesa)");
   if (context?.orderType === "DELIVERY" && !context?.deliveryAddress) missingData.push("ENDEREÇO");
+  if (context?.orderType === "PRESENCIAL" && !context?.tableNumber) missingData.push("NÚMERO DA MESA (se for comer no local)");
   if (!context?.paymentMethod) missingData.push("PAGAMENTO");
   
   const missingDataInfo = missingData.length > 0 
@@ -1379,9 +1397,10 @@ ESTADO ATUAL DO PEDIDO
 ────────────────────────
 - Itens: ${cartSummary}
 - Total: R$ ${cartTotal.toFixed(2)}
-- Tipo: ${context.orderType || "Não definido"}
+- Tipo: ${context.orderType || "Não definido"}${context.orderType === "PRESENCIAL" && context.tableNumber ? ` (Mesa ${context.tableNumber})` : ""}
 - Pagamento: ${context.paymentMethod || "Não definido"}
 - Nome: ${context.customerName || "Não informado"}
+- Mesa: ${context.tableNumber || "Não informada"}
 
 Não repita essas informações ao cliente,
 a menos que ele peça explicitamente.
@@ -1403,7 +1422,8 @@ Use set_name quando souber.` :
 `**ATENDIMENTO NORMAL (cliente: ${context.customerName}):**
 Produto mencionado → add_to_cart e reaja com empolgação
 Após adicionar → pergunte se quer mais de forma casual
-Finalizar → pergunta entrega ou retirada
+Finalizar → pergunta: entrega, retirada ou vai comer no local (mesa)?
+Mesa → use set_table com o número da mesa (pergunte se não souber)
 Entrega → pede endereço
 Pagamento → set_payment
 Tudo preenchido → confirm_order`}
@@ -1425,7 +1445,7 @@ Responda SEMPRE em JSON:
 {
   "text_reply": "Frase única, curta e direta",
   "voice_reply_script": "Mesma ideia, adaptada para fala",
-  "action": "none | add_to_cart | set_delivery | set_pickup | set_address | set_payment | set_name | confirm_order | request_review",
+  "action": "none | add_to_cart | set_delivery | set_pickup | set_table | set_address | set_payment | set_name | confirm_order | request_review",
   "action_data": {}
 }`;
 }
@@ -1435,6 +1455,7 @@ type ConfirmOrderBlockReason =
   | "missing_name"
   | "missing_order_type"
   | "missing_address"
+  | "missing_table"
   | "missing_payment"
   | "create_failed"
   | "sent_to_review"; // Pedido foi registrado como revisão
@@ -1510,6 +1531,7 @@ function getConfirmOrderBlockReason(context: ConversationContext): ConfirmOrderB
   if (!isValidCustomerName(context.customerName)) return "missing_name";
   if (!context.orderType) return "missing_order_type";
   if (context.orderType === "DELIVERY" && !context.deliveryAddress) return "missing_address";
+  if (context.orderType === "PRESENCIAL" && !context.tableNumber) return "missing_table";
   if (!context.paymentMethod) return "missing_payment";
   return null;
 }
@@ -1528,8 +1550,13 @@ function getMissingDataQuestion(reason: ConfirmOrderBlockReason): { text: string
       };
     case "missing_order_type":
       return {
-        text: "Vai ser entrega ou retirada?",
-        voice: "Vai ser entrega ou retirada?",
+        text: "Vai ser entrega, retirada ou comer no local (mesa)?",
+        voice: "Vai ser entrega, retirada ou comer no local?",
+      };
+    case "missing_table":
+      return {
+        text: "Qual o número da sua mesa? 🪑",
+        voice: "Qual o número da sua mesa?",
       };
     case "missing_address":
       return {
@@ -1723,8 +1750,11 @@ async function processWithAI(
                 textReply = "Show! Pra confirmar, me diz seu nome. Ou diga *REVISAR* pra gente registrar e conferir depois.";
                 voiceReply = "Show! Pra eu confirmar o pedido, me diz seu nome. Ou fale revisar pra gente registrar e conferir depois.";
               } else if (blocked === "missing_order_type") {
-                textReply = "Vai ser entrega ou retirada? Ou diga *REVISAR* pra gente registrar e conferir depois.";
-                voiceReply = "Vai ser entrega ou retirada? Ou fale revisar pra gente registrar e conferir depois.";
+                textReply = "Vai ser entrega, retirada ou comer no local (mesa)? Ou diga *REVISAR* pra gente registrar e conferir depois.";
+                voiceReply = "Vai ser entrega, retirada ou comer no local? Ou fale revisar pra gente registrar e conferir depois.";
+              } else if (blocked === "missing_table") {
+                textReply = "Qual o número da sua mesa? 🪑 Ou diga *REVISAR* pra gente registrar e conferir depois.";
+                voiceReply = "Qual o número da sua mesa? Ou fale revisar pra gente registrar e conferir depois.";
               } else if (blocked === "missing_address") {
                 textReply = "Perfeito. Me passa seu endereço completo, por favor (rua, número, bairro). Ou diga *REVISAR* pra gente registrar e conferir depois.";
                 voiceReply = "Perfeito. Me passa seu endereço completo. Ou fale revisar pra gente registrar e conferir depois.";
@@ -1768,7 +1798,7 @@ async function processWithAI(
         if (!actionOrderNumber && !actionSentToReview && !missingAfter) {
           const userWantsFinalize = /\b(confirmar|confirmo|finalizar|finalizo|fechar|fecha|pode\s+confirmar|pode\s+fechar|isso\s+mesmo)\b/i.test(message);
           const actionLikelyLastStep =
-            ["set_name", "set_payment", "set_address", "set_delivery", "set_pickup", "set_change"].includes(parsed.action || "");
+            ["set_name", "set_payment", "set_address", "set_delivery", "set_pickup", "set_table", "set_change"].includes(parsed.action || "");
 
           if (userWantsFinalize || (missingBefore && actionLikelyLastStep)) {
             const autoConfirm = await processAIAction(
@@ -1780,6 +1810,7 @@ async function processWithAI(
                 name: newContext.customerName,
                 delivery_type: newContext.orderType,
                 address: newContext.deliveryAddress,
+                table_number: newContext.tableNumber,
                 payment: newContext.paymentMethod,
                 change_for: newContext.changeFor,
               },
@@ -1905,6 +1936,7 @@ async function processWithAI(
           name: newContext.customerName,
           delivery_type: newContext.orderType,
           address: newContext.deliveryAddress,
+          table_number: newContext.tableNumber,
           payment: newContext.paymentMethod,
           change_for: newContext.changeFor,
         },
@@ -2024,6 +2056,14 @@ async function processAIAction(
       newContext.orderType = "PRESENCIAL";
       break;
       
+    case "set_table":
+      newContext.orderType = "PRESENCIAL";
+      if (actionData.table_number) {
+        newContext.tableNumber = parseInt(actionData.table_number);
+        console.log(`[AI Action] Mesa definida: ${newContext.tableNumber}`);
+      }
+      break;
+      
     case "set_address":
       if (actionData.address) {
         newContext.deliveryAddress = actionData.address;
@@ -2104,6 +2144,9 @@ async function processAIAction(
       if (actionData.address) {
         newContext.deliveryAddress = actionData.address;
       }
+      if (actionData.table_number) {
+        newContext.tableNumber = parseInt(actionData.table_number);
+      }
       if (actionData.payment) {
         const paymentMap: Record<string, "PIX" | "CARTAO" | "DINHEIRO"> = {
           "pix": "PIX", "PIX": "PIX",
@@ -2120,6 +2163,7 @@ async function processAIAction(
         !isValidCustomerName(newContext.customerName) ||
         !newContext.orderType ||
         (newContext.orderType === "DELIVERY" && !newContext.deliveryAddress) ||
+        (newContext.orderType === "PRESENCIAL" && !newContext.tableNumber) ||
         !newContext.paymentMethod;
       
       // Se tem dados faltantes, incrementa contador de tentativas
@@ -2153,6 +2197,8 @@ async function processAIAction(
           confirmOrderBlocked = "missing_order_type";
         } else if (newContext.orderType === "DELIVERY" && !newContext.deliveryAddress) {
           confirmOrderBlocked = "missing_address";
+        } else if (newContext.orderType === "PRESENCIAL" && !newContext.tableNumber) {
+          confirmOrderBlocked = "missing_table";
         } else if (!newContext.paymentMethod) {
           confirmOrderBlocked = "missing_payment";
         }
@@ -2221,6 +2267,10 @@ async function processAIAction(
       if (actionData.address) {
         newContext.deliveryAddress = actionData.address;
         console.log(`[AI Action] Endereço definido via request_review: ${newContext.deliveryAddress}`);
+      }
+      if (actionData.table_number) {
+        newContext.tableNumber = parseInt(actionData.table_number);
+        console.log(`[AI Action] Mesa definida via request_review: ${newContext.tableNumber}`);
       }
       if (actionData.payment) {
         const paymentMap: Record<string, "PIX" | "CARTAO" | "DINHEIRO"> = {
@@ -2420,8 +2470,9 @@ async function createOrder(
   if (isReview) {
     const missingFields: string[] = [];
     if (!context.customerName) missingFields.push("NOME");
-    if (!context.orderType) missingFields.push("TIPO (entrega/retirada)");
+    if (!context.orderType) missingFields.push("TIPO (entrega/retirada/mesa)");
     if (context.orderType === "DELIVERY" && !context.deliveryAddress) missingFields.push("ENDEREÇO");
+    if (context.orderType === "PRESENCIAL" && !context.tableNumber) missingFields.push("NÚMERO DA MESA");
     if (!context.paymentMethod) missingFields.push("PAGAMENTO");
     
     orderNotes = `⚠️ EM REVISÃO - Dados faltantes: ${missingFields.length > 0 ? missingFields.join(", ") : "verificar com cliente"}`;
@@ -2434,10 +2485,11 @@ async function createOrder(
     .from("orders")
     .insert({
       channel: "WHATSAPP",
-      order_type: context.orderType || "PRESENCIAL", // Default para presencial se não definido
+      order_type: context.orderType || "PRESENCIAL",
       customer_name: context.customerName || "PENDENTE - REVISÃO",
       customer_phone: phone,
       delivery_address: context.deliveryAddress,
+      table_number: context.tableNumber || null,
       payment_method: context.paymentMethod,
       subtotal,
       delivery_fee: deliveryFee,
