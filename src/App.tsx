@@ -8,6 +8,9 @@ import Menu from "./pages/Menu";
 import Checkout from "./pages/Checkout";
 import OrderSuccess from "./pages/OrderSuccess";
 import KDS from "./pages/KDS";
+import KDSKitchen from "./pages/KDSKitchen";
+import KDSCounter from "./pages/KDSCounter";
+import KDSReady from "./pages/KDSReady";
 import AdminLogin from "./pages/admin/AdminLogin";
 import AdminDashboard from "./pages/admin/AdminDashboard";
 import AdminCategories from "./pages/admin/AdminCategories";
@@ -38,6 +41,9 @@ const App = () => (
             <Route path="/mesa/:tableNumber" element={<TableActivation />} />
             <Route path="/conta-mesa/:tableNumber" element={<TableBill />} />
             <Route path="/kds" element={<KDS />} />
+            <Route path="/kds/kitchen" element={<KDSKitchen />} />
+            <Route path="/kds/counter" element={<KDSCounter />} />
+            <Route path="/kds/ready" element={<KDSReady />} />
             <Route path="/admin/login" element={<AdminLogin />} />
             <Route path="/admin" element={<AdminGuard><AdminDashboard /></AdminGuard>} />
             <Route path="/admin/categories" element={<AdminGuard><AdminCategories /></AdminGuard>} />

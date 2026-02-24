@@ -34,6 +34,7 @@ import { toast } from 'sonner';
 import { useQueryClient } from '@tanstack/react-query';
 import { Plus, Pencil, Trash2, Loader2 } from 'lucide-react';
 import { Product } from '@/types/database';
+import { Badge } from '@/components/ui/badge';
 
 export default function AdminProducts() {
   const { data: products, isLoading } = useProducts();
@@ -48,12 +49,13 @@ export default function AdminProducts() {
     category_id: '',
     image_url: '',
     active: true,
+    sector: 'KITCHEN' as 'KITCHEN' | 'COUNTER',
   });
   const [isSaving, setIsSaving] = useState(false);
 
   const openCreateDialog = () => {
     setEditingProduct(null);
-    setFormData({ name: '', description: '', price: '', category_id: '', image_url: '', active: true });
+    setFormData({ name: '', description: '', price: '', category_id: '', image_url: '', active: true, sector: 'KITCHEN' });
     setIsDialogOpen(true);
   };
 
@@ -66,6 +68,7 @@ export default function AdminProducts() {
       category_id: product.category_id || '',
       image_url: product.image_url || '',
       active: product.active,
+      sector: (product as any).sector || 'KITCHEN',
     });
     setIsDialogOpen(true);
   };
@@ -81,6 +84,7 @@ export default function AdminProducts() {
       category_id: formData.category_id || null,
       image_url: formData.image_url || null,
       active: formData.active,
+      sector: formData.sector,
     };
 
     try {
@@ -219,6 +223,21 @@ export default function AdminProducts() {
                   />
                   <Label htmlFor="active">Ativo</Label>
                 </div>
+                <div>
+                  <Label htmlFor="sector">Setor</Label>
+                  <Select
+                    value={formData.sector}
+                    onValueChange={(value: 'KITCHEN' | 'COUNTER') => setFormData(prev => ({ ...prev, sector: value }))}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="KITCHEN">Cozinha</SelectItem>
+                      <SelectItem value="COUNTER">Balcão</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
                 <Button type="submit" className="w-full" disabled={isSaving}>
                   {isSaving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                   Salvar
@@ -238,6 +257,7 @@ export default function AdminProducts() {
               <TableRow>
                 <TableHead>Nome</TableHead>
                 <TableHead>Categoria</TableHead>
+                <TableHead>Setor</TableHead>
                 <TableHead>Preço</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead className="w-24">Ações</TableHead>
@@ -248,6 +268,11 @@ export default function AdminProducts() {
                 <TableRow key={product.id}>
                   <TableCell className="font-medium">{product.name}</TableCell>
                   <TableCell>{getCategoryName(product.category_id)}</TableCell>
+                  <TableCell>
+                    <Badge variant={(product as any).sector === 'COUNTER' ? 'secondary' : 'default'}>
+                      {(product as any).sector === 'COUNTER' ? 'Balcão' : 'Cozinha'}
+                    </Badge>
+                  </TableCell>
                   <TableCell>{formatPrice(product.price)}</TableCell>
                   <TableCell>
                     <span className={product.active ? 'text-green-600' : 'text-red-600'}>

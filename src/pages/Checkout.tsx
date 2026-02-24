@@ -96,6 +96,7 @@ export default function Checkout() {
         unit_price: item.product.price,
         total_price: item.product.price * item.quantity,
         notes: item.notes || null,
+        sector: (item.product as any).sector || 'KITCHEN',
       }));
 
       const { error: itemsError } = await supabase
