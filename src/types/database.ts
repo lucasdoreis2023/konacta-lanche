@@ -36,6 +36,7 @@ export interface Order {
   customer_name: string | null;
   customer_phone: string | null;
   delivery_address: string | null;
+  table_number: number | null;
   payment_method: PaymentMethod | null;
   subtotal: number;
   delivery_fee: number;

@@ -97,7 +97,7 @@ export default function AdminOrders() {
                   </TableCell>
                   <TableCell>
                     <Badge variant="outline">
-                      {order.order_type === 'DELIVERY' ? 'Delivery' : 'Retirada'}
+                      {order.order_type === 'DELIVERY' ? 'Delivery' : `Mesa ${order.table_number || '-'}`}
                     </Badge>
                   </TableCell>
                   <TableCell className="font-medium">{formatPrice(order.total)}</TableCell>

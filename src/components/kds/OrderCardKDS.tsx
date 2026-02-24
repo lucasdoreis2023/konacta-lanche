@@ -121,7 +121,7 @@ export function OrderCardKDS({ order }: OrderCardKDSProps) {
               </Badge>
             )}
             <Badge variant="secondary" className="text-xs">
-              {order.channel} • {order.order_type === 'DELIVERY' ? 'Delivery' : 'Retirada'}
+              {order.channel} • {order.order_type === 'DELIVERY' ? 'Delivery' : `Mesa ${order.table_number || '-'}`}
             </Badge>
           </div>
         </div>
