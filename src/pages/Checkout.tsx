@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useState, useEffect } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Header } from '@/components/layout/Header';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -15,15 +15,17 @@ import { OrderType, PaymentMethod } from '@/types/database';
 
 export default function Checkout() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const mesaParam = searchParams.get('mesa');
   const { items, total, clearCart } = useCart();
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const [formData, setFormData] = useState({
     customerName: '',
     customerPhone: '',
-    orderType: 'PRESENCIAL' as OrderType,
+    orderType: (mesaParam ? 'PRESENCIAL' : 'PRESENCIAL') as OrderType,
     deliveryAddress: '',
-    tableNumber: '',
+    tableNumber: mesaParam || '',
     paymentMethod: 'DINHEIRO' as PaymentMethod,
     notes: '',
   });
