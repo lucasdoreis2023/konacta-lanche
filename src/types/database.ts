@@ -3,6 +3,7 @@ export type OrderType = 'PRESENCIAL' | 'DELIVERY';
 export type PaymentMethod = 'PIX' | 'CARTAO' | 'DINHEIRO';
 export type OrderStatus = 'RECEBIDO' | 'EM_PREPARO' | 'PRONTO' | 'ENTREGUE' | 'CANCELADO';
 export type AppRole = 'admin' | 'user';
+export type ItemSector = 'KITCHEN' | 'COUNTER';
 
 export interface Category {
   id: string;
@@ -21,6 +22,7 @@ export interface Product {
   price: number;
   image_url: string | null;
   active: boolean;
+  sector: ItemSector;
   created_at: string;
   updated_at: string;
 }
@@ -56,6 +58,7 @@ export interface OrderItem {
   unit_price: number;
   total_price: number;
   notes: string | null;
+  sector: ItemSector;
 }
 
 export interface CartItem {

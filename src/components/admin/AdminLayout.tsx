@@ -17,6 +17,8 @@ import {
   Menu,
   X,
   Armchair,
+  Store,
+  Bell,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useState } from 'react';
@@ -30,7 +32,10 @@ const navItems = [
   { path: '/admin/reports', label: 'Relatórios', icon: BarChart3 },
   { path: '/admin/users', label: 'Usuários', icon: Users },
   { path: '/admin/settings', label: 'Configurações', icon: Settings },
-  { path: '/kds', label: 'KDS', icon: ChefHat },
+  { path: '/kds', label: 'KDS (Geral)', icon: ChefHat },
+  { path: '/kds/kitchen', label: 'Cozinha', icon: ChefHat },
+  { path: '/kds/counter', label: 'Balcão', icon: Store },
+  { path: '/kds/ready', label: 'Prontos', icon: Bell },
 ];
 
 interface AdminLayoutProps {

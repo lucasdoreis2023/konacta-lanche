@@ -82,6 +82,7 @@ export type Database = {
           product_id: string | null
           product_name: string
           quantity: number
+          sector: Database["public"]["Enums"]["item_sector"]
           total_price: number
           unit_price: number
         }
@@ -92,6 +93,7 @@ export type Database = {
           product_id?: string | null
           product_name: string
           quantity?: number
+          sector?: Database["public"]["Enums"]["item_sector"]
           total_price: number
           unit_price: number
         }
@@ -102,6 +104,7 @@ export type Database = {
           product_id?: string | null
           product_name?: string
           quantity?: number
+          sector?: Database["public"]["Enums"]["item_sector"]
           total_price?: number
           unit_price?: number
         }
@@ -219,6 +222,7 @@ export type Database = {
           image_url: string | null
           name: string
           price: number
+          sector: Database["public"]["Enums"]["item_sector"]
           updated_at: string | null
         }
         Insert: {
@@ -230,6 +234,7 @@ export type Database = {
           image_url?: string | null
           name: string
           price: number
+          sector?: Database["public"]["Enums"]["item_sector"]
           updated_at?: string | null
         }
         Update: {
@@ -241,6 +246,7 @@ export type Database = {
           image_url?: string | null
           name?: string
           price?: number
+          sector?: Database["public"]["Enums"]["item_sector"]
           updated_at?: string | null
         }
         Relationships: [
@@ -340,6 +346,7 @@ export type Database = {
     }
     Enums: {
       app_role: "admin" | "user"
+      item_sector: "KITCHEN" | "COUNTER"
       order_channel: "SITE" | "WHATSAPP"
       order_status:
         | "RECEBIDO"
@@ -477,6 +484,7 @@ export const Constants = {
   public: {
     Enums: {
       app_role: ["admin", "user"],
+      item_sector: ["KITCHEN", "COUNTER"],
       order_channel: ["SITE", "WHATSAPP"],
       order_status: [
         "RECEBIDO",
