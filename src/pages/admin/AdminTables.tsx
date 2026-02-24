@@ -27,6 +27,7 @@ interface TableRow {
   table_number: number;
   password: string;
   active: boolean;
+  occupied_since: string | null;
 }
 
 const formatPrice = (price: number) =>
@@ -49,15 +50,27 @@ export default function AdminTables() {
   });
 
   const activeTables = useMemo(() => {
-    if (!orders) return [];
     const tableMap = new Map<number, OrderWithItems[]>();
-    orders
-      .filter(o => o.order_type === 'PRESENCIAL' && o.table_number)
-      .forEach(order => {
-        const num = order.table_number!;
-        if (!tableMap.has(num)) tableMap.set(num, []);
-        tableMap.get(num)!.push(order);
-      });
+
+    // Add tables with active orders
+    if (orders) {
+      orders
+        .filter(o => o.order_type === 'PRESENCIAL' && o.table_number)
+        .forEach(order => {
+          const num = order.table_number!;
+          if (!tableMap.has(num)) tableMap.set(num, []);
+          tableMap.get(num)!.push(order);
+        });
+    }
+
+    // Add occupied tables (activated but maybe no orders yet)
+    if (tables) {
+      tables
+        .filter(t => t.occupied_since && t.active)
+        .forEach(t => {
+          if (!tableMap.has(t.table_number)) tableMap.set(t.table_number, []);
+        });
+    }
 
     const result: TableData[] = [];
     tableMap.forEach((tableOrders, tableNumber) => {
@@ -66,14 +79,16 @@ export default function AdminTables() {
         (sum, o) => sum + o.order_items.reduce((s, i) => s + i.quantity, 0),
         0
       );
-      const oldestOrder = tableOrders.reduce(
-        (oldest, o) => (o.created_at < oldest ? o.created_at : oldest),
-        tableOrders[0].created_at
-      );
+      const oldestOrder = tableOrders.length > 0
+        ? tableOrders.reduce(
+            (oldest, o) => (o.created_at < oldest ? o.created_at : oldest),
+            tableOrders[0].created_at
+          )
+        : tables?.find(t => t.table_number === tableNumber)?.occupied_since || new Date().toISOString();
       result.push({ tableNumber, orders: tableOrders, totalAmount, oldestOrder, itemCount });
     });
     return result.sort((a, b) => a.tableNumber - b.tableNumber);
-  }, [orders]);
+  }, [orders, tables]);
 
   const occupiedTableNumbers = useMemo(
     () => new Set(activeTables.map(t => t.tableNumber)),
@@ -83,13 +98,21 @@ export default function AdminTables() {
   const handleCloseTable = async (table: TableData) => {
     try {
       const ids = table.orders.map(o => o.id);
-      const { error } = await supabase
-        .from('orders')
-        .update({ status: 'ENTREGUE' as OrderStatus })
-        .in('id', ids);
-      if (error) throw error;
+      if (ids.length > 0) {
+        const { error } = await supabase
+          .from('orders')
+          .update({ status: 'ENTREGUE' as OrderStatus })
+          .in('id', ids);
+        if (error) throw error;
+      }
+      // Clear occupied_since
+      await supabase
+        .from('tables')
+        .update({ occupied_since: null } as any)
+        .eq('table_number', table.tableNumber);
       toast.success(`Mesa ${table.tableNumber} fechada — ${formatPrice(table.totalAmount)}`);
       queryClient.invalidateQueries({ queryKey: ['orders'] });
+      queryClient.invalidateQueries({ queryKey: ['tables'] });
     } catch (error) {
       console.error('Erro ao fechar mesa:', error);
       toast.error('Erro ao fechar mesa');
