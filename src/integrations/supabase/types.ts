@@ -282,6 +282,7 @@ export type Database = {
           active: boolean
           created_at: string | null
           id: string
+          occupied_since: string | null
           password: string
           table_number: number
           updated_at: string | null
@@ -290,6 +291,7 @@ export type Database = {
           active?: boolean
           created_at?: string | null
           id?: string
+          occupied_since?: string | null
           password?: string
           table_number: number
           updated_at?: string | null
@@ -298,6 +300,7 @@ export type Database = {
           active?: boolean
           created_at?: string | null
           id?: string
+          occupied_since?: string | null
           password?: string
           table_number?: number
           updated_at?: string | null
